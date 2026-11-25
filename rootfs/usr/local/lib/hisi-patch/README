@@ -1,0 +1,78 @@
+hisi-patch-check —— 擎云 L540（麒麟9006C）deepin25-on-Rootb 本地补丁自检/恢复
+============================================================================
+
+这台机器的 deepin 25 用户态（Rootb 分区）靠一批本地补丁才能正常使用：
+Wi-Fi/NetworkManager 垫片（hisi-nmfix）、厂商 libmali GPU + glvnd EGL 垫片（hisi-mali）、
+treeland 合成器适配（libtl-malibuf / libtl-norender / drop-in）、wpa_supplicant 2.9+hisi、
+蓝牙 hciattach-hisi、elfverify 绕过 init（d25-init）、UOS Boot 分区 grub 引导入口、
+ddm 登录卡死看门狗（hisi-ddm-watchdog）、box64 x86_64 模拟、指纹守护链接、动态壁纸重编码等。
+apt 升级或误操作可能覆盖它们。本工具定期把现场与“黄金副本”逐个比对，发现改动可以一键恢复。
+
+桌面用户（用户级 systemd 检查、桌面通知的接收者）默认是 uid 1000，可用环境变量 HISI_DESKTOP_UID 覆盖。
+files.list、fstab 受保护行的规则是按作者机器写的（/data bind 挂载、Roota 自动挂载、box64），
+别的机器上不存在的条目在 snapshot 时自动跳过，按需增删即可。
+
+用法（root）：
+  sudo hisi-patch-check            # 全量检查，逐项输出；退出码 0=正常 1=补丁被改动/丢失 2=仅警告 3=未初始化
+  sudo hisi-patch-check --fix      # 恢复被改/丢失的文件（先备份到 /var/backups/hisi-patch/<时间戳>/），
+                                   # 修正 enable/disable、补回 fstab/hosts 缺行、恢复 binfmt 注册、daemon-reload；
+                                   # 绝不自动重启图形/网络服务，只打印“需要重启的服务”清单
+  sudo hisi-patch-check snapshot   # 有意修改补丁后重新抓取黄金副本/哈希/包版本基线（可反复重跑，原子替换）
+  sudo hisi-patch-check --quiet    # 只在有问题时输出+写日志+桌面通知（apt 钩子/开机用）
+  sudo hisi-patch-check --apt-hook # 同 --quiet
+  HISI_PATCH_ROOT=/tmp/xxx sudo -E hisi-patch-check ...   # 演练：文件检查/修复指向临时副本根目录，
+                                   # 不触碰线上文件（systemctl 等系统级检查仍只读针对真实系统）
+
+文件说明：
+  /usr/local/sbin/hisi-patch-check              主脚本（bash，root 运行）
+  /usr/local/lib/hisi-patch/files.list          跟踪清单：一行一个路径或 glob；前缀
+                                                unowned: 只纳入 dpkg 不拥有的文件；
+                                                noauto:  只检测、--fix 不自动恢复（如 box64）
+  /usr/local/lib/hisi-patch/golden/             黄金副本（保持原路径结构、权限、符号链接）
+  /usr/local/lib/hisi-patch/meta/manifest.tsv   哈希清单（类型/权限/sha256/链接目标/路径）
+  /usr/local/lib/hisi-patch/meta/packages.list      敏感包清单（apt 钩子提示 + 版本基线来源）
+  /usr/local/lib/hisi-patch/meta/packages.baseline  包版本基线
+  /usr/local/lib/hisi-patch/meta/fstab.baseline     受保护的 fstab 行（/data bind、Roota、根UUID、swap）
+  /usr/local/lib/hisi-patch/meta/hosts.baseline     受保护的 /etc/hosts 行（内网解析；静态文件，可手工编辑）
+  /usr/local/lib/hisi-patch/meta/noauto.list        只检测不自动恢复的条目
+  /usr/local/lib/hisi-patch/meta/boot-custom.meta   UOS Boot 分区 grub 入口的位置与哈希
+  /usr/local/lib/hisi-patch/meta/golden-boot-custom.cfg   grub custom.cfg 黄金副本
+  /usr/local/lib/hisi-patch/apt-pre-hook        apt Pre-Install-Pkgs 钩子：装敏感包前终端醒目提示（不阻止）
+  /etc/apt/apt.conf.d/99hisi-patch-check        DPkg::Post-Invoke 调 --apt-hook（|| true，绝不影响 apt）
+  /etc/systemd/system/hisi-patch-check.service  开机 multi-user.target 之后跑一次 --apt-hook
+  /etc/systemd/system/hisi-patch-check.timer    每天跑一次
+  /var/log/hisi-patch-check.log                 检查日志（超过 512KB 自动截半）
+  /var/backups/hisi-patch/<时间戳>/             --fix 恢复前的现场备份
+
+特殊条目说明：
+  - UOS Boot 分区 /grub/custom.cfg：该分区平时不挂载，不进 files.list/golden 树，由
+    boot-custom.meta 指定分区 UUID 与路径，用 debugfs 只读校验；--fix 仅在分区未挂载时
+    以 debugfs 写入（先 dump 备份），写完即校验哈希。
+  - /etc/hisi-mali/egl-deny：用户可编辑的黑名单，只检查存在性，不比对内容，不自动恢复；
+    /etc/hisi-mali/egl-off 存在时表示用户手动全局关闭了 EGL 垫片，只提示不算异常。
+  - box64（build-env agent 从 UOS Roota 复制）：检测+基线快照，但 --fix 不自动恢复文件，
+    只提示手工恢复来源；binfmt 注册丢失时可自动执行 systemctl restart systemd-binfmt。
+  - 动态壁纸：调用 hisi-wallpaper-reencode 自带的 --check（只读）；恢复需手工运行
+    sudo hisi-wallpaper-reencode（重编码耗时数分钟，本工具不会在 apt 钩子里同步执行）。
+
+如何添加/修改跟踪条目：
+  1. 编辑 files.list 加一行（路径或 glob；目录下全部文件用 dir/*；只检测加 noauto: 前缀）。
+  2. sudo hisi-patch-check snapshot   （重建 golden/ 与 manifest.tsv；有意改过补丁也要先 snapshot）
+  注意：/usr/local/sbin/* 和 /usr/local/lib/hisi-mali/* 等目录里新出现的文件会在下次
+  snapshot 时自动纳入；check 时发现的未跟踪新文件会以“新增未纳入”提示。
+
+卸载：
+  sudo systemctl disable --now hisi-patch-check.timer
+  sudo systemctl disable hisi-patch-check.service
+  sudo rm /etc/systemd/system/hisi-patch-check.service /etc/systemd/system/hisi-patch-check.timer
+  sudo rm /etc/apt/apt.conf.d/99hisi-patch-check
+  sudo rm /usr/local/sbin/hisi-patch-check /usr/local/lib/hisi-patch/apt-pre-hook
+  sudo rm -rf /usr/local/lib/hisi-patch
+  sudo systemctl daemon-reload
+  # 日志与备份按需清理：/var/log/hisi-patch-check.log /var/backups/hisi-patch
+
+注意：
+  - 其它会话（mali 构建、指纹/人脸、build-env）会合法地修改各自负责的文件；有意的修改
+    完成后请运行 snapshot 更新基线，否则会被当作“改动”报告。
+  - --fix 只恢复文件与开机状态（enable/disable）、补行、重注册 binfmt，绝不自动重启
+    图形/网络服务；需要重启的服务会打印在输出末尾，请人工确认后执行。

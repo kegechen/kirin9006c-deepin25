@@ -1,0 +1,39 @@
+#!/bin/sh
+# deepin25 on Rootb 的 init 包装（grub 里 init= 指向它），PID 保持 1，最后 exec 成 systemd。
+#
+# 原因：UOS 厂商内核内建了 elfverify LSM（"uos elfverify guard"），开机默认开启，所有 execve 都要过 access_verify。
+# UOS 靠用户态的 deepin-elf-verify 守护进程（开发者模式）往 /sys/kernel/security/elfverify/status 写 0 关掉它。
+# deepin 没有这个守护进程，systemd 255 第一次 posix_spawn systemd-executor 时，子进程在 access_verify 里永久等待，
+# PID1 跟着卡在 vfork 里（2026-11-24 用 d25-init-probe 抓到的内核栈）。所以在 exec systemd 之前先写 0。
+# 注意：必须用 printf 0（不带换行），echo 0 会返回 I/O error。
+S=/sys/kernel/security/elfverify/status
+[ -e $S ] || mount -t securityfs securityfs /sys/kernel/security 2>/dev/null
+if [ -e $S ]; then
+  printf 0 > $S 2>/dev/null
+  echo "d25-init: elfverify status=$(cat $S 2>/dev/null)" > /dev/kmsg 2>/dev/null
+fi
+
+# 内核参数带 d25.probe=1 时留一个探针：90 秒后 PID1 若还卡在 clone（syscall 220），抓栈写日志后 sysrq 重启
+case " $(cat /proc/cmdline) " in
+*" d25.probe=1 "*)
+  (
+    sleep 90
+    case "$(cat /proc/1/syscall 2>/dev/null)" in 220\ *) ;; *) exit 0;; esac
+    mount -o remount,rw / 2>/dev/null
+    D=/var/log/d25-boot; mkdir -p $D; F=$D/probe-$(date +%Y%m%d-%H%M%S).txt
+    {
+      echo "== uptime $(cat /proc/uptime)"
+      echo "== elfverify status $(cat $S 2>/dev/null)"
+      for p in /proc/[0-9]*; do
+        [ -n "$(tr -d '\0' < $p/cmdline 2>/dev/null)" ] || continue
+        echo "=================== pid=${p#/proc/} cmd=$(tr '\0' ' ' < $p/cmdline 2>/dev/null) wchan=$(cat $p/wchan 2>/dev/null)"
+        for t in $p/task/*; do echo "-- task ${t##*/} syscall: $(cat $t/syscall 2>/dev/null)"; cat $t/stack 2>/dev/null; done
+      done
+    } > $F 2>&1
+    dmesg > $F.dmesg 2>&1
+    sync; sleep 3
+    echo b > /proc/sysrq-trigger
+  ) &
+  ;;
+esac
+exec /usr/lib/systemd/systemd "$@"

@@ -1,0 +1,43 @@
+#!/bin/sh
+# deepin25 试启动用的 init 包装（grub 里 init= 指向它）。
+# 先在后台留一个探针进程，再 exec 成真正的 systemd（PID 仍是 1）。
+# 探针 75 秒后抓 PID1 及其子进程的内核栈/系统调用，写到 Rootb 的 /var/log/d25-boot，
+# 然后 sysrq 重启（next_entry 已被消耗，会回到 UOS），不用人去按电源。
+(
+  sleep 75
+  mount -o remount,rw / 2>/dev/null
+  D=/var/log/d25-boot
+  mkdir -p $D
+  F=$D/probe-$(date +%Y%m%d-%H%M%S).txt
+  {
+    echo "== uptime $(cat /proc/uptime)"
+    echo "== cmdline $(cat /proc/cmdline)"
+    for p in /proc/[0-9]*; do
+      pid=${p#/proc/}
+      st=$(cat $p/stat 2>/dev/null) || continue
+      rest=${st##*) }
+      state=${rest%% *}
+      ppid=$(echo "$rest" | cut -d' ' -f2)
+      [ -n "$(tr -d '\0' < $p/cmdline 2>/dev/null)" ] || [ "$state" = D ] || continue
+      echo "=================== pid=$pid ppid=$ppid state=$state comm=$(cat $p/comm 2>/dev/null)"
+      echo "cmdline: $(tr '\0' ' ' < $p/cmdline 2>/dev/null)"
+      echo "exe: $(readlink $p/exe 2>/dev/null)  wchan: $(cat $p/wchan 2>/dev/null)"
+      echo "stat: $st"
+      for t in $p/task/*; do
+        echo "-- task ${t##*/} syscall: $(cat $t/syscall 2>/dev/null)"
+        cat $t/stack 2>/dev/null
+      done
+    done
+    echo "== pid1 stat again (5s later, check utime/stime moving)"
+    sleep 5; cat /proc/1/stat
+    echo "== fds of pid1"; ls -l /proc/1/fd 2>&1 | head -80
+    echo "== mounts"; cat /proc/self/mounts
+  } > $F 2>&1
+  echo w > /proc/sysrq-trigger
+  sleep 2
+  dmesg > $F.dmesg 2>&1
+  sync
+  sleep 3
+  echo b > /proc/sysrq-trigger
+) &
+exec /usr/lib/systemd/systemd "$@"

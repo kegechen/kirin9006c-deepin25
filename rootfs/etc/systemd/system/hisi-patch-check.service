@@ -1,0 +1,10 @@
+[Unit]
+Description=hisi-patch-check 本地补丁自检（开机后运行一次，--apt-hook 安静模式）
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hisi-patch-check --apt-hook
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,46 @@
+# 敏感包清单：这些包升级可能覆盖 L540 本地补丁依赖的库/服务，或被卸载会破坏构建环境。
+# apt Pre-Install-Pkgs 钩子按本清单在终端提示；snapshot 按本清单记录版本基线；
+# 基线中的包被卸载时 hisi-patch-check 报警（只报警，不自动重装）。
+treeland
+treeland-data
+treeland-wallpaper-factory
+network-manager
+libnm0
+wpasupplicant
+libwayland-client0
+libwayland-egl1
+libwayland-server0
+libglvnd0
+libegl1
+libegl-mesa0
+libgles2
+libgbm1
+libqt6gui6
+ddm
+lightdm
+dde-shell
+dde-control-center
+libmpv2
+mpv
+systemd
+systemd-resolved
+libc6
+libdrm2
+libssl3
+bluez
+grub-common
+grub2-common
+grub-efi-arm64
+grub-efi-arm64-bin
+grub-efi-arm64-signed
+grub-efi-arm64-unsigned
+deepin-immutable-ctl
+deepin-immutable-boot
+linux-image-deepin-hwe-arm64
+linux-image-6.6.159-arm64-desktop-hwe
+clang
+clang-17
+lld
+lld-17
+cmake
+ninja-build

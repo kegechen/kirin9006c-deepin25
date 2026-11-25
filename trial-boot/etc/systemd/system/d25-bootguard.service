@@ -1,0 +1,10 @@
+[Unit]
+Description=deepin25 trial boot guard (dump logs at 3 min, reboot back to UOS if no network in 10 min)
+DefaultDependencies=no
+IgnoreOnIsolate=yes
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/d25-bootguard.sh
+KillMode=process
+[Install]
+WantedBy=sysinit.target

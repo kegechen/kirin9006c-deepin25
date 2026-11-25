@@ -1,0 +1,10 @@
+[Unit]
+Description=每天运行一次 hisi-patch-check 补丁自检
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

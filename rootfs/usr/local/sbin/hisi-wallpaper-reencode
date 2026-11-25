@@ -1,0 +1,76 @@
+#!/bin/sh
+# 把 deepin 动态壁纸（4K H.264）重编码成屏幕高度 1440 的版本，降低软解开销（本机屏幕 2160x1440）。
+# 实测（Sailfish，mpv 全屏，libmali 渲染）：4K 111% CPU -> 1440p 42%；控制中心式小窗预览 90% -> 41%。
+#
+# 做法：dpkg-divert 把包里的原文件改名挪到 $ORIG（包升级会写到那里，不会覆盖重编码版本），
+#       再从原文件编码出新文件放回原路径。可重复运行：已转换且仍有效的文件会跳过。
+# 用法（root）：hisi-wallpaper-reencode.sh [--check | --undo]
+#   --check  只检查，不改动；有未转换/失效的文件时退出码 1
+#   --undo   删除重编码文件、撤销 divert，恢复包里的原文件
+set -eu
+DIR=/usr/share/wallpapers/deepin-livewallpapers
+ORIG=/usr/local/share/hisi-wallpapers/orig
+H=1440
+mode=${1:-apply}
+
+[ "$(id -u)" = 0 ] || [ "$mode" = --check ] || { echo "需要 root" >&2; exit 2; }
+mkdir -p "$ORIG" 2>/dev/null || true
+
+height() { ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$1" 2>/dev/null || true; }
+diverted_to() { dpkg-divert --truename "$1"; }
+
+bad=0
+for b in $( (ls "$DIR"; ls "$ORIG") 2>/dev/null | grep '\.mp4$' | grep -v '\.tmp\.mp4$' | sort -u); do
+    f=$DIR/$b
+    o=$ORIG/$b
+    case "$mode" in
+    --check)
+        if [ "$(diverted_to "$f")" != "$o" ] || [ ! -s "$o" ] || [ "$(height "$f")" != "$H" ]; then
+            echo "未转换或已失效：$f"
+            bad=1
+        else
+            echo "正常：$f（$(height "$f")p，原文件 $o）"
+        fi
+        ;;
+    --undo)
+        if [ "$(diverted_to "$f")" = "$o" ]; then
+            rm -f "$f"
+            dpkg-divert --local --rename --divert "$o" --remove "$f"
+            echo "已恢复：$f"
+        fi
+        ;;
+    *)
+        if [ "$(diverted_to "$f")" != "$o" ]; then
+            dpkg-divert --local --rename --divert "$o" --add "$f"
+        fi
+        if [ ! -s "$o" ]; then
+            echo "找不到原文件 $o，跳过 $b" >&2
+            continue
+        fi
+        if [ -s "$f" ] && [ "$(height "$f")" = "$H" ] && [ "$f" -nt "$o" ]; then
+            echo "已是 ${H}p：$f"
+            continue
+        fi
+        oh=$(height "$o")
+        if [ -n "$oh" ] && [ "$oh" -le "$H" ]; then
+            cp -a "$o" "$f.tmp.mp4"
+        else
+            # fastdecode（CAVLC、无去块滤波）在这颗 CPU 上比默认参数再省约 30% 解码时间
+            nice -n 19 ffmpeg -v error -y -i "$o" -map 0:v:0 -map '0:a?' -c:a copy \
+                -vf "scale=-2:$H:flags=lanczos" -c:v libx264 -preset slow -crf 20 -tune fastdecode \
+                -profile:v main -pix_fmt yuv420p -movflags +faststart "$f.tmp.mp4"
+        fi
+        n0=$(ffprobe -v error -count_packets -select_streams v:0 -show_entries stream=nb_read_packets -of csv=p=0 "$o")
+        n1=$(ffprobe -v error -count_packets -select_streams v:0 -show_entries stream=nb_read_packets -of csv=p=0 "$f.tmp.mp4")
+        if [ "$n0" != "$n1" ]; then
+            echo "帧数不一致（原 $n0，新 $n1），放弃 $b" >&2
+            rm -f "$f.tmp.mp4"
+            continue
+        fi
+        chmod 644 "$f.tmp.mp4"
+        mv -f "$f.tmp.mp4" "$f"
+        echo "已转换：$f（$(du -m "$o" | cut -f1)MB -> $(du -m "$f" | cut -f1)MB，$n1 帧）"
+        ;;
+    esac
+done
+exit $bad

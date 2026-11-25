@@ -1,0 +1,36 @@
+#!/bin/bash
+# apt DPkg::Pre-Install-Pkgs 钩子：从 stdin 读取本次要安装的 .deb/包名列表，
+# 命中敏感包（/usr/local/lib/hisi-patch/meta/packages.list）时在终端打印醒目提示。
+# 只提示不阻止，任何情况下都以 0 退出，绝不让 apt 失败。
+L=/usr/local/lib/hisi-patch/meta/packages.list
+[ -r "$L" ] || exit 0
+hits=""
+declare -A seen=()
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  b=${line##*/}                       # /var/cache/.../treeland_0.11.0_arm64.deb
+  name=${b%%_*}                       # 去掉 _版本_arch
+  case "$line" in
+    */*) ;;                           # 带路径的 .deb，用上面结果
+    *)  name=${line%%=*}; name=${name%%:*} ;;   # 纯包名（可能带 =版本 或 :arch）
+  esac
+  [ -n "$name" ] || continue
+  while IFS= read -r p; do
+    case "$p" in ''|'#'*) continue ;; esac
+    if [ "$name" = "$p" ] && [ -z "${seen[$p]:-}" ]; then seen[$p]=1; hits="$hits$p"$'\n'; fi
+  done < "$L"
+done
+[ -n "$hits" ] || exit 0
+{
+  echo ""
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  echo "!!  警告：本次安装/升级涉及 L540 本地补丁依赖的敏感软件包："
+  printf '%s' "$hits" | sort -u | while IFS= read -r h; do
+    [ -n "$h" ] && echo "!!    - $h"
+  done
+  echo "!!  升级可能覆盖 GPU/Wi-Fi/合成器等本地补丁。"
+  echo "!!  完成后请运行: sudo hisi-patch-check"
+  echo "!!  若报告改动:   sudo hisi-patch-check --fix"
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+} >&2
+exit 0

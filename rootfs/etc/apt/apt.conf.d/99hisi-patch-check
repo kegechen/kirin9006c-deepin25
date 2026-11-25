@@ -1,0 +1,4 @@
+// hisi-patch-check：dpkg 事务后自动校验 L540 本地补丁是否被覆盖。
+// 两个钩子都必须 || true，绝不能让 apt 失败。
+DPkg::Post-Invoke { "/usr/local/sbin/hisi-patch-check --apt-hook || true" };
+DPkg::Pre-Install-Pkgs { "/usr/local/lib/hisi-patch/apt-pre-hook || true" };

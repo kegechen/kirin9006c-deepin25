@@ -1,0 +1,793 @@
+#!/bin/bash
+# ============================================================================
+# hisi-patch-check —— 华为擎云 L540（麒麟9006C）deepin25-on-Rootb 本地补丁自检/恢复工具
+#
+# 用法（root 运行）：
+#   hisi-patch-check             全量检查，逐项输出；退出码 0=正常 1=补丁被改动/丢失 2=仅警告
+#   hisi-patch-check --fix       从黄金副本恢复被改/丢失文件（先备份到 /var/backups/hisi-patch/<时间戳>/），
+#                                修正开机 enable/disable 状态、补回 fstab/hosts 缺行、daemon-reload；
+#                                绝不自动重启图形/网络服务，只打印“需要重启的服务”清单
+#   hisi-patch-check snapshot    重新抓取黄金副本/哈希清单/包版本基线（有意修改补丁后使用，可反复重跑）
+#   hisi-patch-check --quiet     只在有问题时输出+写日志+桌面通知（apt 钩子/开机 service 用）
+#   hisi-patch-check --apt-hook  同 --quiet
+#   HISI_PATCH_ROOT=/tmp/xxx     演练：把文件检查/修复指向前缀根目录，不触碰线上文件
+#                                （systemctl / dpkg 等系统级检查仍只读针对真实系统）
+#
+# 退出码：0=全部正常；1=补丁被改动/丢失/缺失（含 binfmt 未注册、包被卸载、壁纸异常等）；
+#         2=仅警告（包版本变化、ELF 版本需复核等）；3=配置错误（未 snapshot 等）
+# ============================================================================
+set -u
+export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+umask 022
+
+BASE=/usr/local/lib/hisi-patch
+GOLDEN=$BASE/golden
+META=$BASE/meta
+FILES_LIST=$BASE/files.list
+PKG_LIST=$META/packages.list
+MANIFEST=$META/manifest.tsv            # 类型<TAB>权限<TAB>sha256或链接目标<TAB>路径
+PKG_BASELINE=$META/packages.baseline   # 包名<TAB>版本
+FSTAB_BASELINE=$META/fstab.baseline    # 受保护的 fstab 行（逐行，含 Roota/data/bind/swap/根UUID）
+HOSTS_BASELINE=$META/hosts.baseline    # 受保护的 /etc/hosts 行（逐行，内网解析）
+NOAUTO=$META/noauto.list               # 只检测不自动恢复的条目（如 box64，来自 build-env agent）
+CUSTOM_GOLDEN=$META/golden-boot-custom.cfg
+CUSTOM_META=$META/boot-custom.meta     # uuid= / path= / sha256=
+LOG=/var/log/hisi-patch-check.log
+LOCK=/run/lock/hisi-patch.lock
+BACKUP_ROOT=/var/backups/hisi-patch
+WLROOTS_LIB=/usr/lib/aarch64-linux-gnu/libwaylib-wlroots.so.0.20
+WLROOTS_REAL=libwaylib-wlroots.so.0.20.2   # tl-malibuf 按此版本的结构布局编写
+WL_SYMS="wlr_allocator_autocreate wlr_drm_create wlr_buffer_init wlr_buffer_finish wlr_buffer_drop wlr_buffer_register_resource_interface wlr_dmabuf_attributes_finish wlr_backend_get_drm_fd wlr_renderer_get_drm_fd"
+WALLPAPER_TOOL=/usr/local/sbin/hisi-wallpaper-reencode
+# 桌面用户（用户级 systemd 检查、桌面通知）：默认 uid 1000，可用 HISI_DESKTOP_UID 覆盖
+DESKTOP_UID=${HISI_DESKTOP_UID:-1000}
+DESKTOP_USER=$(getent passwd "$DESKTOP_UID" 2>/dev/null | cut -d: -f1)
+USER_RUN=/run/user/$DESKTOP_UID
+
+ROOT=${HISI_PATCH_ROOT:-}
+ROOT=${ROOT%/}
+TESTROOT=0
+[ -n "$ROOT" ] && TESTROOT=1
+BKBASE=$BACKUP_ROOT
+[ $TESTROOT = 1 ] && BKBASE="$ROOT$BACKUP_ROOT"   # 演练时备份也放进沙箱
+
+MODE=check
+FIX=0
+QUIET=0
+case "${1:-}" in
+  --fix)                    MODE=fix ;;
+  snapshot|--update-baseline) MODE=snapshot ;;
+  --quiet|--apt-hook)       MODE=quiet; QUIET=1 ;;
+  ""|check)                 MODE=check ;;
+  -h|--help)                sed -n '2,20p' "$0"; exit 0 ;;
+  *) echo "未知参数: $1（可用: 无/--fix/snapshot/--quiet/--apt-hook/--help）"; exit 64 ;;
+esac
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+N_OK=0; N_CHG=0; N_MIS=0; N_ALM=0; N_WRN=0; N_SKIP=0
+FIXED=0
+RESTART=""
+REPORT=""; TMPF=""; TMPF2=""
+
+# ---------- 输出辅助 ----------
+note() { printf '%s\n' "$*" >> "$REPORT"; [ $QUIET = 0 ] && printf '%s\n' "$*"; return 0; }
+say()  { printf '%s\n' "$*" >> "$REPORT"; printf '%s\n' "$*"; }
+ok()   { N_OK=$((N_OK+1));   note "  [OK]   $1"; }
+chg()  { N_CHG=$((N_CHG+1)); say  "  [改动] $1"; }
+mis()  { N_MIS=$((N_MIS+1)); say  "  [缺失] $1"; }
+alarm(){ N_ALM=$((N_ALM+1)); say  "  [报警] $1"; }
+wrn()  { N_WRN=$((N_WRN+1)); say  "  [警告] $1"; }
+skp()  { N_SKIP=$((N_SKIP+1)); note "  [跳过] $1"; }
+inf()  { note "  [提示] $1"; }
+reset_counters(){ N_OK=0; N_CHG=0; N_MIS=0; N_ALM=0; N_WRN=0; N_SKIP=0; }
+compute_code(){
+  if [ $N_CHG -gt 0 ] || [ $N_MIS -gt 0 ] || [ $N_ALM -gt 0 ]; then echo 1
+  elif [ $N_WRN -gt 0 ]; then echo 2
+  else echo 0; fi
+}
+
+# ---------- 文件清单展开（files.list -> “flag 路径”列表） ----------
+# 前缀：unowned: 只纳入 dpkg 不拥有的文件；noauto: 只检测不自动恢复（非本方文件）
+expand_list(){
+  local line entry unowned noauto flag f
+  [ -r "$FILES_LIST" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    [ -z "$line" ] && continue
+    case "$line" in '#'*) continue ;; esac
+    unowned=0; noauto=0; entry=$line
+    case "$entry" in noauto:*)   noauto=1;   entry=${entry#noauto:}   ;; esac
+    case "$entry" in unowned:*)  unowned=1;  entry=${entry#unowned:}  ;; esac
+    if [ $noauto = 1 ]; then flag=noauto; else flag=auto; fi
+    if ! compgen -G "$entry" >/dev/null 2>&1; then
+      printf '__MISSING__ %s\n' "$entry"
+      continue
+    fi
+    while IFS= read -r f; do
+      [ -f "$ROOT$f" ] || [ -L "$ROOT$f" ] || continue
+      if [ "$unowned" = 1 ] && dpkg -S "$ROOT$f" >/dev/null 2>&1; then continue; fi
+      printf '%s %s\n' "$flag" "$f"
+    done < <(compgen -G "$entry" | sort)
+  done < "$FILES_LIST"
+}
+
+# ---------- 恢复单个文件（含现场备份） ----------
+fixfile(){  # $1=路径 $2=类型(file/link) $3=sha256或链接目标
+  local live="$ROOT$1" gold="$GOLDEN$1" bk="$BKBASE/$STAMP$1"
+  mkdir -p "$(dirname "$bk")" "$(dirname "$live")"
+  if [ -e "$live" ] || [ -L "$live" ]; then
+    cp -a "$live" "$bk" 2>/dev/null && note "  [备份] $1 -> $bk"
+  fi
+  rm -rf "$live"
+  if [ "$2" = link ]; then
+    ln -s "$3" "$live"
+  else
+    cp -a "$gold" "$live"
+  fi
+  if [ -e "$live" ] || [ -L "$live" ]; then
+    say "  [修复] 已从黄金副本恢复 $1"
+    FIXED=1
+    case "$1" in
+      /usr/local/lib/hisi-mali/*|/etc/systemd/system/treeland.service.d/*|/etc/glvnd/egl_vendor.d/*)
+        RESTART="$RESTART treeland.service" ;;
+      /usr/local/lib/hisi-nmfix/*|/etc/systemd/system/NetworkManager.service.d/*|/etc/NetworkManager/conf.d/*)
+        RESTART="$RESTART NetworkManager.service" ;;
+      /usr/local/sbin/wpa_supplicant-hisi|/usr/local/lib/hisi-wpa/*|/etc/systemd/system/wpa_supplicant.service.d/*)
+        RESTART="$RESTART wpa_supplicant.service" ;;
+      /usr/local/bin/hciattach-hisi|/etc/systemd/system/hciattach.service.d/*)
+        RESTART="$RESTART hciattach.service" ;;
+      /etc/systemd/resolved.conf.d/*)
+        RESTART="$RESTART systemd-resolved.service" ;;
+      /etc/X11/default-display-manager)
+        RESTART="$RESTART ddm.service" ;;
+      /usr/bin/fingerprint_daemon)
+        RESTART="$RESTART hwfp_init.service" ;;
+      /usr/local/sbin/hisi-ddm-watchdog|/etc/systemd/system/hisi-ddm-watchdog.service)
+        RESTART="$RESTART hisi-ddm-watchdog.service" ;;
+    esac
+  else
+    say "  [修复失败] 恢复 $1 失败，请人工检查"
+  fi
+}
+
+# ---------- 检查项 1：文件与符号链接 ----------
+check_files(){
+  note "-- 补丁文件（与黄金副本逐个比对） --"
+  local ftype fmode fhash fpath live gold st msg t h m
+  while IFS=$'\t' read -r ftype fmode fhash fpath; do
+    [ -n "${fpath:-}" ] || continue
+    live="$ROOT$fpath"; gold="$GOLDEN$fpath"
+    st=0; msg=""
+    if [ "$ftype" = link ]; then
+      if [ ! -e "$live" ] && [ ! -L "$live" ]; then
+        st=2; msg="符号链接丢失（期望 -> $fhash）"
+      elif [ ! -L "$live" ]; then
+        st=1; msg="符号链接被替换成普通文件（期望 -> $fhash）"
+      else
+        t=$(readlink "$live")
+        if [ "$t" != "$fhash" ]; then st=1; msg="符号链接目标改变：$t（期望 $fhash）"; fi
+      fi
+    else
+      if [ ! -e "$live" ] && [ ! -L "$live" ]; then
+        st=2; msg="文件丢失（黄金副本可恢复）"
+      elif [ -L "$live" ]; then
+        st=1; msg="文件被替换成符号链接 -> $(readlink "$live")"
+      else
+        h=$(sha256sum "$live" 2>/dev/null | cut -d' ' -f1)
+        m=$(stat -c '%a' "$live" 2>/dev/null)
+        if [ "$h" != "$fhash" ]; then st=1; msg="内容被改动（sha256 不匹配）"
+        elif [ "$m" != "$fmode" ]; then st=1; msg="权限被改动：$m（期望 $fmode）"; fi
+      fi
+    fi
+    if [ "$st" = 0 ]; then ok "$fpath"; continue; fi
+    if [ "$st" = 2 ]; then mis "$fpath —— $msg"; else chg "$fpath —— $msg"; fi
+    if [ $FIX = 1 ]; then
+      if grep -Fxq "$fpath" "$NOAUTO" 2>/dev/null; then
+        say "  [修复跳过] $fpath 标记为 noauto（build-env agent 的文件，不自动恢复）；请从 UOS Roota 或构建环境手工恢复"
+      else
+        fixfile "$fpath" "$ftype" "$fhash"
+      fi
+    fi
+  done < "$MANIFEST"
+  # 清单里没跟踪、但 glob 能匹配到的新文件（提示，不算问题）
+  local x f
+  declare -A TRACKED=()
+  while IFS=$'\t' read -r _ _ _ fpath; do TRACKED["$fpath"]=1; done < "$MANIFEST"
+  while IFS= read -r x; do
+    case "$x" in '__MISSING__ '*|'') continue ;; esac
+    f=${x#* }
+    [ -n "${TRACKED[$f]:-}" ] || inf "新增未纳入跟踪: $f（若是补丁文件请加入 files.list 后 snapshot）"
+  done < <(expand_list)
+}
+
+# ---------- 检查项 2：fstab 受保护行（/data bind + Roota + 根UUID + swap） ----------
+check_fstab(){
+  note "-- /etc/fstab（Rootb/data/Roota 相关行，逐行比对） --"
+  [ -f "$FSTAB_BASELINE" ] || { skp "无 fstab 基线（先 snapshot）"; return; }
+  local live="$ROOT/etc/fstab" bl total=0 match=0
+  [ -r "$live" ] || { mis "/etc/fstab 无法读取"; return; }
+  : > "$TMPF"
+  while IFS= read -r bl || [ -n "$bl" ]; do
+    [ -n "$bl" ] || continue
+    total=$((total+1))
+    if grep -Fxq -- "$bl" "$live"; then match=$((match+1)); else printf '%s\n' "$bl" >> "$TMPF"; fi
+  done < "$FSTAB_BASELINE"
+  if [ "$match" = "$total" ]; then ok "fstab 受保护行完整（$total/$total 行）"; return; fi
+  while IFS= read -r bl; do mis "fstab 缺行: $bl"; done < "$TMPF"
+  if [ $FIX = 1 ]; then
+    local bk="$BKBASE/$STAMP/etc/fstab"
+    mkdir -p "$(dirname "$bk")"
+    cp -a "$live" "$bk" && note "  [备份] /etc/fstab -> $bk"
+    { echo ""
+      echo "# ==== 由 hisi-patch-check --fix 于 $STAMP 补回的缺失行 ===="
+      cat "$TMPF"
+    } >> "$live"
+    say "  [修复] 已把缺失行补回 fstab（未执行 mount -a，挂载生效请人工 mount -a 或重启）"
+    FIXED=1
+  fi
+}
+
+# ---------- 检查项 3：/etc/hosts 内网解析行 ----------
+check_hosts(){
+  note "-- /etc/hosts（内网解析行，逐行比对） --"
+  [ -f "$HOSTS_BASELINE" ] || { skp "无 hosts 基线"; return; }
+  local live="$ROOT/etc/hosts" bl total=0 match=0
+  [ -r "$live" ] || { mis "/etc/hosts 无法读取"; return; }
+  : > "$TMPF2"
+  while IFS= read -r bl || [ -n "$bl" ]; do
+    [ -n "$bl" ] || continue
+    total=$((total+1))
+    if grep -Fxq -- "$bl" "$live"; then match=$((match+1)); else printf '%s\n' "$bl" >> "$TMPF2"; fi
+  done < "$HOSTS_BASELINE"
+  if [ "$match" = "$total" ]; then ok "hosts 内网解析行完整（$total/$total 行）"; return; fi
+  while IFS= read -r bl; do mis "hosts 缺行: $bl"; done < "$TMPF2"
+  if [ $FIX = 1 ]; then
+    local bk="$BKBASE/$STAMP/etc/hosts"
+    mkdir -p "$(dirname "$bk")"
+    cp -a "$live" "$bk" && note "  [备份] /etc/hosts -> $bk"
+    { echo ""
+      echo "# ==== 由 hisi-patch-check --fix 于 $STAMP 补回的缺失行 ===="
+      cat "$TMPF2"
+    } >> "$live"
+    say "  [修复] 已把缺失行补回 /etc/hosts"
+    FIXED=1
+  fi
+}
+
+# ---------- 检查项 4：UOS Boot 分区 grub 入口 custom.cfg（debugfs 只读） ----------
+check_custom(){
+  note "-- UOS Boot 分区 /grub/custom.cfg（deepin25-rootb 引导入口） --"
+  if [ $TESTROOT = 1 ]; then skp "测试根模式，跳过（该文件在真实 UOS Boot 分区上，演练不涉及）"; return; fi
+  [ -f "$CUSTOM_META" ] || { skp "无 boot-custom.meta"; return; }
+  local uuid cpath want
+  uuid=$(grep  '^uuid='   "$CUSTOM_META" | cut -d= -f2)
+  cpath=$(grep '^path='  "$CUSTOM_META" | cut -d= -f2-)
+  want=$(grep '^sha256=' "$CUSTOM_META" | cut -d= -f2-)
+  [ -n "$uuid" ] && [ -n "$cpath" ] || { skp "boot-custom.meta 不完整"; return; }
+  [ -n "$want" ] || { skp "custom.cfg 尚无基线哈希（先 snapshot）"; return; }
+  local dev="/dev/disk/by-uuid/$uuid"
+  [ -e "$dev" ] || { wrn "UOS Boot 分区设备不存在（uuid=$uuid），无法校验 grub 入口"; return; }
+  local content h
+  content=$(debugfs -R "cat $cpath" "$dev" 2>/dev/null | grep -v '^debugfs ')
+  if [ -z "$content" ]; then wrn "debugfs 读取 custom.cfg 失败，无法校验 grub 入口"; return; fi
+  h=$(printf '%s\n' "$content" | sha256sum | cut -d' ' -f1)
+  if [ "$h" = "$want" ]; then
+    ok "custom.cfg 内容与基线一致（含 deepin25-rootb 入口）"
+  else
+    if printf '%s\n' "$content" | grep -q "deepin25-rootb"; then
+      chg "custom.cfg 内容被改动（哈希不匹配，但仍含 deepin25-rootb 入口）"
+    else
+      chg "custom.cfg 被改动/覆盖，deepin25-rootb 入口丢失（重启会回不到 deepin25！）"
+    fi
+    if [ $FIX = 1 ]; then
+      if findmnt -rn -S "$dev" >/dev/null 2>&1; then
+        say "  [修复跳过] UOS Boot 分区当前已挂载，为安全起见不在线写入；请从 UOS 侧手工恢复"
+      else
+        local bk="$BKBASE/$STAMP/grub-custom.cfg" stg
+        mkdir -p "$(dirname "$bk")"
+        debugfs -R "dump $cpath $bk" "$dev" >/dev/null 2>&1 && note "  [备份] 旧 custom.cfg -> $bk"
+        stg=$(mktemp)
+        cp -a "$CUSTOM_GOLDEN" "$stg"
+        debugfs -w -R "rm $cpath" "$dev" >/dev/null 2>&1
+        if debugfs -w -R "write $stg $cpath" "$dev" >/dev/null 2>&1; then
+          local h2
+          h2=$(debugfs -R "cat $cpath" "$dev" 2>/dev/null | grep -v '^debugfs ' | sha256sum | cut -d' ' -f1)
+          if [ "$h2" = "$want" ]; then
+            say "  [修复] custom.cfg 已用黄金副本重写（UOS Boot 分区，未挂载状态）"
+            FIXED=1
+          else
+            say "  [修复失败] 写入后校验不通过！备份在 $bk，请立即人工检查"
+          fi
+        else
+          say "  [修复失败] debugfs 写入失败，请人工检查（备份在 $bk）"
+        fi
+        rm -f "$stg"
+      fi
+    fi
+  fi
+}
+
+# ---------- 检查项 5：systemd 开机状态、服务环境与指纹/TEE 守护 ----------
+check_state(){
+  note "-- 系统状态（systemctl / elfverify，只读；--fix 仅改 enable/disable 与授权的恢复动作） --"
+  local ue u want cur e x miss l act
+  for ue in ddm:enabled lightdm:disabled d25-bootguard.service:disabled d25-netguard.service:disabled hwfp_init.service:enabled hisi-ddm-watchdog.service:enabled; do
+    u=${ue%%:*}; want=${ue#*:}
+    cur=$(systemctl is-enabled "$u" 2>/dev/null) || true
+    if [ -z "$cur" ]; then skp "$u 不存在或无法查询"; continue; fi
+    if [ "$cur" = "$want" ]; then
+      ok "$u 开机状态=$want"
+    else
+      chg "$u 开机状态=$cur（期望 $want）"
+      if [ $FIX = 1 ] && [ $TESTROOT = 0 ]; then
+        if systemctl "$want" "$u" >/dev/null 2>&1; then
+          say "  [修复] systemctl $want $u 已执行"
+        else
+          say "  [修复失败] systemctl $want $u"
+        fi
+      fi
+    fi
+  done
+  # 指纹/TEE 运行状态
+  act=$(systemctl is-active hwfp_init 2>/dev/null) || true
+  if [ -z "$act" ]; then skp "hwfp_init.service 无法查询"
+  elif [ "$act" = active ]; then ok "hwfp_init.service 运行中（指纹初始化正常）"
+  else
+    alarm "hwfp_init.service 未运行（指纹功能失效）"
+    if [ $FIX = 1 ] && [ $TESTROOT = 0 ]; then
+      if systemctl start hwfp_init.service >/dev/null 2>&1; then
+        say "  [修复] systemctl start hwfp_init.service 已执行"
+      else
+        say "  [修复失败] systemctl start hwfp_init.service"
+      fi
+    fi
+  fi
+  # ddm 登录卡死看门狗（ddm 0.4 二次 Login 时子进程 fork 后卡在 futex）
+  act=$(systemctl is-active hisi-ddm-watchdog 2>/dev/null) || true
+  if [ -z "$act" ]; then skp "hisi-ddm-watchdog.service 无法查询"
+  elif [ "$act" = active ]; then ok "hisi-ddm-watchdog.service 运行中"
+  else
+    alarm "hisi-ddm-watchdog.service 未运行（注销后重新登录可能让锁屏/登录界面失去响应）"
+    if [ $FIX = 1 ] && [ $TESTROOT = 0 ]; then
+      if systemctl start hisi-ddm-watchdog.service >/dev/null 2>&1; then
+        say "  [修复] systemctl start hisi-ddm-watchdog.service 已执行"
+      else
+        say "  [修复失败] systemctl start hisi-ddm-watchdog.service"
+      fi
+    fi
+  fi
+  act=$(systemctl is-active teecd 2>/dev/null) || true
+  if [ -z "$act" ]; then skp "teecd.service 无法查询"
+  elif [ "$act" = active ]; then ok "teecd.service 运行中（TEE 正常）"
+  else wrn "teecd.service 未运行（指纹/可信执行依赖，请人工排查）"
+  fi
+  local v
+  v=$(cat /sys/kernel/security/elfverify/status 2>/dev/null) || true
+  if [ -z "$v" ]; then skp "elfverify status 不可读"
+  elif [ "$v" = 0 ]; then ok "elfverify status=0（execve 校验已关闭）"
+  else alarm "elfverify status=$v（非 0！execve 校验开启会导致程序启动卡死，开机 init 写 0 失效？）"
+  fi
+  # treeland 的 LD_PRELOAD 环境
+  e=$(systemctl show -p Environment treeland.service 2>/dev/null) || true
+  if [ -z "$e" ]; then skp "treeland.service 无法查询"
+  else
+    miss=""
+    for l in libmali-compat.so libmali.so.0 libtl-malibuf.so libtl-norender.so; do
+      case "$e" in *"$l"*) ;; *) miss="$miss $l" ;; esac
+    done
+    if [ -z "$miss" ]; then
+      ok "treeland.service 预加载齐全（libmali-compat/libmali/libtl-malibuf/libtl-norender）"
+    else
+      chg "treeland.service 环境缺失:$miss（drop-in 或 so 文件被覆盖？）"
+      RESTART="$RESTART treeland.service"
+    fi
+  fi
+  # NetworkManager 垫片
+  e=$(systemctl show -p Environment NetworkManager.service 2>/dev/null) || true
+  if [ -z "$e" ]; then skp "NetworkManager.service 无法查询"
+  elif case "$e" in *libnm-station-fix.so*) true;; *) false;; esac; then
+    ok "NetworkManager.service 已预加载 libnm-station-fix.so"
+  else
+    chg "NetworkManager.service 未预加载 libnm-station-fix.so（Wi-Fi 查询会死循环）"
+    RESTART="$RESTART NetworkManager.service"
+  fi
+  # wpa_supplicant / hciattach 的 ExecStart
+  x=$(systemctl show -p ExecStart wpa_supplicant.service 2>/dev/null) || true
+  if [ -z "$x" ]; then skp "wpa_supplicant.service 无法查询"
+  elif case "$x" in */usr/local/sbin/wpa_supplicant-hisi*) true;; *) false;; esac; then
+    ok "wpa_supplicant.service ExecStart 指向 wpa_supplicant-hisi"
+  else
+    chg "wpa_supplicant.service ExecStart 被改回原版（Hi1103 会卡死 rtnl）"
+    RESTART="$RESTART wpa_supplicant.service"
+  fi
+  x=$(systemctl show -p ExecStart hciattach.service 2>/dev/null) || true
+  if [ -z "$x" ]; then skp "hciattach.service 无法查询"
+  elif case "$x" in */usr/local/bin/hciattach-hisi*) true;; *) false;; esac; then
+    ok "hciattach.service ExecStart 指向 hciattach-hisi"
+  else
+    chg "hciattach.service ExecStart 被改回原版（蓝牙初始化会失败）"
+    RESTART="$RESTART hciattach.service"
+  fi
+}
+
+# ---------- 检查项 6：libwaylib-wlroots ELF 符号（升级后最容易静默失效） ----------
+check_elf(){
+  note "-- ELF 兼容性（libwaylib-wlroots.so.0.20 导出符号） --"
+  # 该库属于 treeland 包，不是补丁文件：演练（HISI_PATCH_ROOT）时仍查真实系统（只读）
+  local lib="$WLROOTS_LIB" real rb nmout miss s
+  [ $TESTROOT = 0 ] && lib="$ROOT$WLROOTS_LIB"
+  if [ ! -e "$lib" ] && [ ! -L "$lib" ]; then
+    alarm "$WLROOTS_LIB 缺失（treeland GPU 渲染会整体失效）"
+    return
+  fi
+  real=$(readlink -f "$lib" 2>/dev/null)
+  rb=${real##*/}
+  if [ "$rb" != "$WLROOTS_REAL" ]; then
+    wrn "libwaylib-wlroots 实际版本 $rb（libtl-malibuf 按 $WLROOTS_REAL 结构布局编写，需复核）"
+  else
+    ok "libwaylib-wlroots 版本 $rb"
+  fi
+  nmout=$(nm -D --defined-only "$real" 2>/dev/null) || true
+  miss=""
+  for s in $WL_SYMS; do
+    printf '%s\n' "$nmout" | grep -qE " $s\$" || miss="$miss $s"
+  done
+  if [ -z "$miss" ]; then
+    ok "9 个关键 wlr_* 符号全部导出"
+  else
+    alarm "libwaylib-wlroots 缺少符号:$miss（treeland/libtl-malibuf 将无法工作）"
+  fi
+}
+
+# ---------- 检查项 7：包版本基线 ----------
+check_packages(){
+  note "-- 软件包基线（版本变化=警告需复核；被卸载=报警） --"
+  [ -f "$PKG_BASELINE" ] || { skp "无包版本基线（先 snapshot）"; return; }
+  local p out st v
+  while IFS=$'\t' read -r p v; do
+    [ -n "${p:-}" ] || continue
+    out=$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}' "$p" 2>/dev/null) || true
+    st=${out%%$'\t'*}
+    case "$st" in
+      ii*)
+        if [ "$v" = "${out#*$'\t'}" ]; then
+          note "  [OK]   $p $v"
+          N_OK=$((N_OK+1))
+        else
+          wrn "$p 版本变化: $v -> ${out#*$'\t'}（补丁按旧版本适配，需复核）"
+        fi
+        ;;
+      *) alarm "$p 未安装（基线要求已安装；被卸载会破坏补丁依赖或构建环境）" ;;
+    esac
+  done < "$PKG_BASELINE"
+}
+
+# ---------- 检查项 8：box64 binfmt 注册（运行时） ----------
+check_binfmt(){
+  note "-- box64 binfmt 注册（x86_64 模拟） --"
+  if [ ! -e "$ROOT/usr/local/bin/box64" ] && [ ! -e "$ROOT/etc/binfmt.d/box64.conf" ]; then skp "未安装 box64"; return; fi
+  if [ ! -d /proc/sys/fs/binfmt_misc ]; then skp "binfmt_misc 未挂载"; return; fi
+  local f=/proc/sys/fs/binfmt_misc/box64
+  if [ ! -e "$f" ]; then
+    alarm "box64 binfmt 未注册（x86_64 程序无法运行）"
+    if [ $FIX = 1 ] && [ $TESTROOT = 0 ]; then
+      if systemctl restart systemd-binfmt.service >/dev/null 2>&1 && [ -e "$f" ]; then
+        say "  [修复] systemctl restart systemd-binfmt 已执行，box64 已重新注册"
+        FIXED=1
+      else
+        say "  [修复失败] restart systemd-binfmt 后仍未注册（检查 /etc/binfmt.d/box64.conf）"
+      fi
+    fi
+    return
+  fi
+  if grep -q '^enabled' "$f" && grep -q '^interpreter /usr/local/bin/box64$' "$f"; then
+    ok "box64 binfmt 已注册且指向 /usr/local/bin/box64"
+  else
+    chg "box64 binfmt 内容异常：$(head -2 "$f" | tr '\n' ' ')"
+  fi
+}
+
+# ---------- 检查项 9：用户态 EGL 垫片开关（/etc/hisi-mali） ----------
+check_glvendor(){
+  note "-- 用户态 EGL 垫片开关（/etc/hisi-mali） --"
+  local d="$ROOT/etc/hisi-mali"
+  if [ ! -d "$d" ]; then
+    if [ $TESTROOT = 1 ]; then skp "测试根未包含 /etc/hisi-mali"; else wrn "/etc/hisi-mali 不存在（egl-deny 黑名单缺失）"; fi
+    return
+  fi
+  if [ -e "$d/egl-off" ]; then
+    inf "egl-off 开关存在：用户态 Mali EGL 已手动全局关闭（提示，不算异常，不自动删除）"
+  elif [ -f "$d/egl-deny" ]; then
+    ok "egl-deny 黑名单存在（内容为用户配置，不比对）"
+  else
+    wrn "/etc/hisi-mali/egl-deny 缺失（GPU 应用黑名单未配置；如确不需要请建 egl-off 或手工恢复）"
+  fi
+}
+
+# ---------- 检查项 10：用户会话 GPU 路径（dde-shell 已加载 libmali） ----------
+check_usersession(){
+  note "-- 用户会话 GPU 路径（dde-shell 进程 maps） --"
+  if [ -e "$ROOT/etc/hisi-mali/egl-off" ]; then
+    inf "egl-off 开启，跳过用户会话 GPU 检查"
+    return
+  fi
+  local pid
+  [ -n "$DESKTOP_USER" ] || { skp "找不到 uid $DESKTOP_UID 对应的桌面用户"; return; }
+  pid=$(timeout 10 sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="$USER_RUN" systemctl --user show -p MainPID --value dde-shell@DDE.service 2>/dev/null) || pid=""
+  case "$pid" in ''|0) skp "dde-shell@DDE.service 未运行或无 MainPID"; return ;; esac
+  [ -r "/proc/$pid/maps" ] || { skp "/proc/$pid/maps 不可读"; return; }
+  if grep -q 'libmali' "/proc/$pid/maps"; then
+    ok "dde-shell（PID $pid）已加载 libmali（客户端 GPU 渲染路径生效）"
+  else
+    wrn "dde-shell（PID $pid）未加载 libmali（合成器缺 mali_buffer_sharing 或 glvnd 垫片被关闭？）"
+  fi
+}
+
+# ---------- 检查项 11：动态壁纸重编码（调用工具自带的 --check，只读） ----------
+check_wallpaper(){
+  note "-- 动态壁纸重编码（hisi-wallpaper-reencode --check） --"
+  local tool="$ROOT$WALLPAPER_TOOL" out rc
+  [ -x "$tool" ] || { skp "hisi-wallpaper-reencode 未安装"; return; }
+  out=$(timeout 120 "$tool" --check 2>&1)
+  rc=$?
+  case "$rc" in
+    0) ok "动态壁纸重编码完好（$(printf '%s\n' "$out" | grep -c '^正常') 个已转换）" ;;
+    1) chg "动态壁纸重编码有异常（$(printf '%s\n' "$out" | grep -c '^未转换') 个未转换/失效）。恢复：sudo hisi-wallpaper-reencode（编码耗时数分钟，本工具不自动执行）" ;;
+    *) wrn "hisi-wallpaper-reencode --check 自身异常（退出码 $rc）：$(printf '%s\n' "$out" | head -1)" ;;
+  esac
+}
+
+# ---------- 检查项 12：treeland 运行时（尽力而为） ----------
+check_runtime(){
+  note "-- 运行时（treeland 进程已加载的库） --"
+  [ $TESTROOT = 1 ] && { skp "测试根模式，跳过"; return; }
+  local pids bad pid m
+  pids=$(pgrep -x treeland) || true
+  if [ -z "$pids" ]; then skp "treeland 未运行"; return; fi
+  bad=""
+  for pid in $pids; do
+    m="/proc/$pid/maps"
+    [ -r "$m" ] || { skp "/proc/$pid/maps 不可读"; continue; }
+    grep -q 'libtl-malibuf.so' "$m" || bad="$bad pid$pid:libtl-malibuf"
+    grep -q 'libmali' "$m"          || bad="$bad pid$pid:libmali"
+  done
+  if [ -z "$bad" ]; then
+    ok "treeland 运行时已加载 libmali / libtl-malibuf（进程数 $(printf '%s\n' $pids | wc -l)）"
+  else
+    wrn "treeland 运行时未加载:$bad（可能回退软渲染）"
+  fi
+}
+
+# ---------- 检查项 13：风险提示 ----------
+check_risks(){
+  note "-- 风险项 --"
+  if [ -e "$ROOT/etc/kernel/postinst.d/zz-update-grub" ]; then
+    inf "/etc/kernel/postinst.d/zz-update-grub 存在：apt 安装新内核会触发 update-grub，可能改掉 UOS Boot 分区的默认启动项"
+  fi
+  local st
+  st=$(deepin-immutable-ctl --immutable-status 2>/dev/null) || true
+  if [ -z "$st" ]; then skp "deepin-immutable-ctl 不可用"
+  elif printf '%s\n' "$st" | grep -qi true; then
+    alarm "deepin-immutable-ctl 报告不可变模式已开启（$st）——文件系统只读，补丁恢复会失败！"
+  else
+    ok "deepin-immutable 不可变模式关闭（$st）"
+  fi
+}
+
+# ---------- 全量检查 ----------
+run_all_checks(){
+  check_files
+  check_fstab
+  check_hosts
+  check_custom
+  check_state
+  check_elf
+  check_packages
+  check_binfmt
+  check_glvendor
+  check_usersession
+  check_wallpaper
+  check_runtime
+  check_risks
+}
+
+# ---------- fix 收尾：daemon-reload（不重启图形/网络服务） ----------
+finish_fix(){
+  [ $FIXED = 1 ] || return 0
+  [ $TESTROOT = 1 ] && { say "（测试根模式：不执行 daemon-reload、不动系统状态）"; return 0; }
+  if systemctl daemon-reload 2>/dev/null; then
+    say "  [修复] systemctl daemon-reload 已执行"
+  else
+    say "  [修复失败] systemctl daemon-reload"
+  fi
+  if [ -n "$DESKTOP_USER" ] && [ -d "$USER_RUN" ]; then
+    if timeout 15 sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="$USER_RUN" systemctl --user daemon-reload >/dev/null 2>&1; then
+      say "  [修复] $DESKTOP_USER 用户 systemctl --user daemon-reload 已执行"
+    else
+      say "  [修复失败] 用户级 daemon-reload（用户会话可能未运行，忽略）"
+    fi
+  fi
+}
+
+print_restart_list(){
+  [ -n "$(printf '%s' "$RESTART" | tr -d ' ')" ] || return 0
+  say ""
+  say "需要重启的服务（本工具绝不自动重启，请人工确认后执行）："
+  printf '%s\n' $RESTART | sort -u | while IFS= read -r s; do
+    say "    systemctl restart $s"
+  done
+  case "$RESTART" in
+    *treeland*) say "    （用户应用需重新登录会话才会重新走 glvnd/Mali 路径）" ;;
+  esac
+}
+
+# ---------- 日志与桌面通知 ----------
+writelog(){
+  local code=$1
+  {
+    echo "==== $(date '+%F %T') mode=$MODE root=${ROOT:-/} 退出码=$code"
+    if [ "$code" -ne 0 ] || [ $FIXED = 1 ]; then cat "$REPORT"; else echo "全部正常"; fi
+  } >> "$LOG" 2>/dev/null || true
+  # 日志超过 512KB 时只保留后半段，防止无限增长
+  if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 524288 ]; then
+    tail -c 262144 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
+  fi
+}
+notify_desktop(){
+  local title=$1 body=$2
+  [ $TESTROOT = 1 ] && return 0
+  [ -n "$DESKTOP_USER" ] && [ -S "$USER_RUN/bus" ] || return 0
+  timeout 10 sudo -u "$DESKTOP_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=$USER_RUN/bus" \
+    notify-send -u critical "$title" "$body" >/dev/null 2>&1 || true
+}
+
+# ---------- snapshot：重建黄金副本与全部基线（可反复重跑） ----------
+do_snapshot(){
+  say "== hisi-patch-check snapshot：重建黄金副本与基线 =="
+  if [ $TESTROOT = 1 ]; then say "错误：snapshot 不能在 HISI_PATCH_ROOT 测试根下运行（基线必须来自真实系统）"; exit 3; fi
+  local x f flag p gp rp nfile nlink npkg nfline skipped=0
+  mapfile -t ALL < <(expand_list)
+  local -a list=()
+  declare -A seen=()
+  : > "$NOAUTO.tmp"
+  for x in "${ALL[@]:-}"; do
+    [ -n "$x" ] || continue
+    case "$x" in
+      '__MISSING__ '*) say "  清单条目无匹配文件，跳过: ${x#__MISSING__ }"; skipped=$((skipped+1)); continue ;;
+    esac
+    flag=${x%% *}; f=${x#* }
+    [ -n "${seen[$f]:-}" ] || { seen[$f]=1; list+=("$f"); }
+    [ "$flag" = noauto ] && printf '%s\n' "$f" >> "$NOAUTO.tmp"
+  done
+  [ ${#list[@]} -gt 0 ] || { say "错误：files.list 没有展开出任何文件"; exit 3; }
+  # 黄金副本（先建 .new 再原子替换）
+  rm -rf "$GOLDEN.new"; mkdir -p "$GOLDEN.new" "$META"
+  for f in "${list[@]}"; do
+    cp -a --parents "$ROOT$f" "$GOLDEN.new/" || { say "错误：复制失败 $f"; exit 4; }
+  done
+  rm -rf "$GOLDEN.old"
+  [ -d "$GOLDEN" ] && mv "$GOLDEN" "$GOLDEN.old"
+  mv "$GOLDEN.new" "$GOLDEN"
+  rm -rf "$GOLDEN.old"
+  mv "$NOAUTO.tmp" "$NOAUTO"
+  # 哈希清单
+  ( cd "$GOLDEN" && find . -mindepth 1 \( -type f -o -type l \) -print0 ) | sort -z | \
+  while IFS= read -r -d '' rp; do
+    p="/${rp#./}"; gp="$GOLDEN$p"
+    if [ -L "$gp" ]; then
+      printf 'link\t-\t%s\t%s\n' "$(readlink "$gp")" "$p"
+    else
+      printf 'file\t%s\t%s\t%s\n' "$(stat -c '%a' "$gp")" "$(sha256sum "$gp" | cut -d' ' -f1)" "$p"
+    fi
+  done > "$MANIFEST.tmp"
+  mv "$MANIFEST.tmp" "$MANIFEST"
+  nfile=$(awk -F'\t' '$1=="file"{c++} END{print c+0}' "$MANIFEST")
+  nlink=$(awk -F'\t' '$1=="link"{c++} END{print c+0}' "$MANIFEST")
+  # 包版本基线
+  : > "$PKG_BASELINE.tmp"
+  while IFS= read -r p || [ -n "$p" ]; do
+    p=${p%$'\r'}
+    case "$p" in ''|'#'*) continue ;; esac
+    local out st
+    out=$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}' "$p" 2>/dev/null) || true
+    st=${out%%$'\t'*}
+    case "$st" in ii*) printf '%s\t%s\n' "$p" "${out#*$'\t'}" >> "$PKG_BASELINE.tmp" ;;
+      *) say "  跳过未安装包: $p" ;; esac
+  done < "$PKG_LIST"
+  mv "$PKG_BASELINE.tmp" "$PKG_BASELINE"
+  npkg=$(wc -l < "$PKG_BASELINE")
+  # fstab 受保护行：/data 相关 + bind 行 + swap 行 + 根文件系统 UUID 行 + Roota 自动挂载行
+  local rsrc ruuid
+  rsrc=$(findmnt -nro SOURCE / 2>/dev/null) || rsrc=""
+  ruuid=""
+  [ -n "$rsrc" ] && ruuid=$(lsblk -nro UUID "$rsrc" 2>/dev/null) || ruuid=""
+  awk -v u="$ruuid" '/\/data| bind,|none[ \t]+swap|Roota|\/media\/uos/ || (u!="" && index($0,u))' "$ROOT/etc/fstab" > "$FSTAB_BASELINE"
+  nfline=$(grep -c . "$FSTAB_BASELINE" || true)
+  # hosts 基线是静态数据文件（安装时生成，可手工编辑），snapshot 不覆盖
+  [ -f "$HOSTS_BASELINE" ] || { say "  警告：$HOSTS_BASELINE 不存在，hosts 检测将跳过"; }
+  # UOS Boot 分区 grub 入口黄金副本
+  local uuid cpath content h
+  uuid=$(grep  '^uuid='  "$CUSTOM_META" 2>/dev/null | cut -d= -f2)
+  cpath=$(grep '^path=' "$CUSTOM_META" 2>/dev/null | cut -d= -f2-)
+  if [ -n "$uuid" ] && [ -n "$cpath" ] && [ -e "/dev/disk/by-uuid/$uuid" ]; then
+    content=$(debugfs -R "cat $cpath" "/dev/disk/by-uuid/$uuid" 2>/dev/null | grep -v '^debugfs ')
+    if [ -n "$content" ]; then
+      printf '%s\n' "$content" > "$CUSTOM_GOLDEN"
+      h=$(printf '%s\n' "$content" | sha256sum | cut -d' ' -f1)
+      sed -i "s/^sha256=.*/sha256=$h/" "$CUSTOM_META"
+      say "  UOS Boot 分区 grub 入口已抓取（$cpath）"
+    else
+      say "  警告：debugfs 读取 custom.cfg 失败，grub 入口基线未更新"
+    fi
+  else
+    say "  警告：找不到 UOS Boot 分区（uuid=$uuid），grub 入口基线未更新"
+  fi
+  printf 'snapshot 时间: %s\n跟踪文件: %d（其中符号链接 %d）\n敏感包: %d\nfstab 受保护行: %d\n跳过条目: %d\n' \
+    "$(date '+%F %T')" "$nfile" "$nlink" "$npkg" "$nfline" "$skipped" > "$META/snapshot.info"
+  say "== snapshot 完成：跟踪 $nfile 个文件（符号链接 $nlink）、$npkg 个敏感包、fstab $nfline 行，跳过条目 $skipped =="
+}
+
+# ---------- 主流程 ----------
+main(){
+  [ -d /run/lock ] || mkdir -p /run/lock
+  exec 9>"$LOCK"
+  flock -n 9 || exit 0    # 已有实例在跑（多为 apt 钩子重叠），静默退出
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "错误：hisi-patch-check 需要 root 运行（sudo hisi-patch-check ...）"
+    exit 4
+  fi
+  REPORT=$(mktemp) || exit 4
+  TMPF=$(mktemp)  || exit 4
+  TMPF2=$(mktemp) || exit 4
+  trap 'rm -f "$REPORT" "$TMPF" "$TMPF2"' EXIT
+  : > "$REPORT"
+
+  if [ "$MODE" = snapshot ]; then
+    do_snapshot
+    exit 0
+  fi
+
+  if [ ! -f "$MANIFEST" ]; then
+    say "错误：未找到基线 $MANIFEST，请先运行：sudo hisi-patch-check snapshot"
+    exit 3
+  fi
+  [ $MODE = fix ] && FIX=1
+
+  if [ $TESTROOT = 1 ]; then
+    note "== hisi-patch-check（演练模式：文件操作限定在 $ROOT 内） =="
+  else
+    note "== hisi-patch-check（$STAMP） =="
+  fi
+  reset_counters
+  run_all_checks
+  if [ $FIX = 1 ]; then
+    finish_fix
+    say ""
+    say "== 修复后复核 =="
+    reset_counters
+    run_all_checks
+  fi
+  code=$(compute_code)
+  note "== hisi-patch-check（$(date '+%F %T')，退出码 $code） =="
+  if [ "$code" != 0 ] || [ $QUIET = 0 ]; then
+    say "==== 汇总：OK $N_OK ｜ 改动 $N_CHG ｜ 缺失 $N_MIS ｜ 报警 $N_ALM ｜ 警告 $N_WRN ｜ 跳过 $N_SKIP ===="
+    case $code in
+      0) say "结论：全部正常（退出码 0）" ;;
+      1) say "结论：检测到补丁被改动/丢失（退出码 1）。恢复：sudo hisi-patch-check --fix（先看上面明细）" ;;
+      2) say "结论：仅警告（退出码 2），多为包版本变化，需人工复核" ;;
+    esac
+  fi
+  print_restart_list
+  writelog "$code"
+  if [ $QUIET = 1 ] && [ "$code" != 0 ]; then
+    if [ "$code" = 1 ]; then
+      notify_desktop "L540 补丁告警" "检测到补丁被改动/丢失（$((N_CHG+N_MIS+N_ALM)) 处）。终端运行 sudo hisi-patch-check 查看详情，确认后 sudo hisi-patch-check --fix 恢复。"
+    else
+      notify_desktop "L540 补丁警告" "软件包版本发生变化，需复核补丁兼容性：sudo hisi-patch-check"
+    fi
+  fi
+  exit "$code"
+}
+
+main

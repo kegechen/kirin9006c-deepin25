@@ -1,0 +1,13 @@
+[Unit]
+Description=Kill ddm session children stuck before exec (ddm 0.4 login hang workaround)
+After=ddm.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/hisi-ddm-watchdog
+Restart=always
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

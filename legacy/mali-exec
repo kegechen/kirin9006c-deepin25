@@ -1,0 +1,24 @@
+#!/bin/sh
+# 让指定程序用厂商 libmali（Mali-G78 GPU）渲染：以符号链接形式放在 /usr/local/bin/<程序名>，
+# 借 PATH 优先级先于 /usr/bin/<程序名> 被找到，设好环境变量后 exec 真正的程序。
+# 合成器没有 mali_buffer_sharing（例如 treeland 回退 llvmpipe）时，libmali-compat 会自动去掉这些变量、
+# 用 Mesa 重新启动程序；HISI_MALI_DISABLE=1 可强制不用 libmali。删除符号链接即恢复原状。
+M=/usr/local/lib/hisi-mali
+name=${0##*/}
+real=/usr/bin/$name
+
+if [ ! -x "$real" ] || [ "$real" -ef "$0" ]; then
+    echo "mali-exec: 找不到 $real" >&2
+    exit 127
+fi
+if [ -z "$HISI_MALI_DISABLE" ] && [ -r "$M/libmali.so.0" ] && [ -r "$M/libmali-compat.so" ]; then
+    case ":${LD_LIBRARY_PATH}:" in
+        *":$M:"*) ;;
+        *) export LD_LIBRARY_PATH="$M${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+    esac
+    case " ${LD_PRELOAD} " in
+        *libmali-compat*) ;;
+        *) export LD_PRELOAD="$M/libmali-compat.so $M/libmali.so.0${LD_PRELOAD:+ $LD_PRELOAD}" ;;
+    esac
+fi
+exec "$real" "$@"

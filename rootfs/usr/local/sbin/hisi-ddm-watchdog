@@ -1,0 +1,52 @@
+#!/bin/bash
+# hisi-ddm-watchdog —— ddm 0.4 登录卡死的看门狗
+#
+# 现象：开机后第二次走 Login（注销后重新登录、重启 treeland 后登录）时，
+# ddm 为新会话 fork 出的某个子进程以用户身份卡在 futex 上、始终没有 exec，
+# ddm 主线程同步读管道等它，于是锁屏/登录界面失去响应（只剩壁纸、
+# 或者报 "Failed to get auth info from display manager"）。
+#
+# 判定：非 root、exe 仍是 /usr/bin/ddm、父进程也是 /usr/bin/ddm、存活超过
+# STUCK_SECS 秒。正常情况下这类子进程几毫秒内就会 exec 成 dde-session /
+# gnome-keyring-daemon，exe 随之改变，不会被误判。
+#
+# 处理：先把内核栈和 gdb 用户态栈记进日志（定位根因用），再 SIGKILL。
+# 被杀后会话领头进程会继续往下走（实测随后正常拉起 dde-session）。
+
+LOG=${LOG:-/var/log/hisi-ddm-watchdog.log}
+STUCK_SECS=${STUCK_SECS:-15}
+INTERVAL=${INTERVAL:-5}
+
+field() { awk -v k="$1:" '$1 == k { print $2; exit }' "$2" 2>/dev/null; }
+
+check_once() {
+    local p pid exe uid ppid age
+    for p in /proc/[0-9]*; do
+        pid=${p#/proc/}
+        exe=$(readlink "$p/exe" 2>/dev/null) || continue
+        [ "$exe" = /usr/bin/ddm ] || continue
+        uid=$(field Uid "$p/status")
+        [ -n "$uid" ] && [ "$uid" != 0 ] || continue
+        ppid=$(field PPid "$p/status")
+        [ "$(readlink "/proc/$ppid/exe" 2>/dev/null)" = /usr/bin/ddm ] || continue
+        age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ "${age:-0}" -ge "$STUCK_SECS" ] || continue
+        {
+            echo "=== $(date '+%F %T') 卡住的 ddm 子进程 pid=$pid uid=$uid ppid=$ppid 存活=${age}s wchan=$(cat "$p/wchan" 2>/dev/null)"
+            echo "--- 子进程内核栈"; cat "$p/stack" 2>/dev/null
+            echo "--- 父进程内核栈"; cat "/proc/$ppid/stack" 2>/dev/null
+            if command -v gdb >/dev/null 2>&1; then
+                echo "--- 子进程 gdb 栈"
+                timeout 40 gdb -p "$pid" -batch -nx -ex 'set debuginfod enabled off' \
+                    -ex 'thread apply all bt' 2>&1 | grep -vE '^(\[New|Reading|Downloading)' | tail -80
+            fi
+        } >>"$LOG" 2>&1
+        kill -KILL "$pid" 2>/dev/null && echo "$(date '+%F %T') 已结束 pid=$pid" >>"$LOG"
+        logger -t hisi-ddm-watchdog "ddm 子进程 $pid（uid $uid）卡住 ${age}s，已结束，详见 $LOG"
+    done
+}
+
+case "${1:-}" in
+    --once) check_once ;;
+    *)      while :; do check_once; sleep "$INTERVAL"; done ;;
+esac

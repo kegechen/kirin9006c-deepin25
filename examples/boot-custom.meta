@@ -1,0 +1,7 @@
+# 放到 /usr/local/lib/hisi-patch/meta/boot-custom.meta，hisi-patch-check 就会校验 UOS Boot 分区上的 grub 入口。
+# UOS Boot 分区（ext4，平时不挂载）上的 grub custom.cfg —— 开机进 deepin25(Rootb) 的唯一入口。
+# 本工具用 debugfs 只读校验；--fix 仅在确认该分区未挂载时才写入（先 dump 备份现场）。
+# sha256 由 sudo hisi-patch-check snapshot 自动填写。
+uuid=<BOOT_UUID>
+path=/grub/custom.cfg
+sha256=

@@ -1,0 +1,8 @@
+[Unit]
+Description=deepin25 trial guard: reboot back to UOS if no network within 10 min
+After=local-fs.target
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/d25-netguard.sh
+[Install]
+WantedBy=multi-user.target

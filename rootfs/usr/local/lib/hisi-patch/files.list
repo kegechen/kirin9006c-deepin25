@@ -1,0 +1,27 @@
+# hisi-patch 跟踪清单：一行一个路径或 glob（# 开头为注释）。
+# 前缀 unowned: = 只纳入不属于任何 deb 包的文件（dpkg -S 判断）。
+# 前缀 noauto:  = 只检测、--fix 不自动恢复（非本方文件，如 build-env agent 的 box64）。
+# 修改本文件（或有意识地改过补丁）之后，运行 `hisi-patch-check snapshot` 重建黄金副本。
+/usr/local/sbin/*
+/usr/local/bin/hciattach-hisi
+noauto:/usr/local/bin/box64
+/usr/local/lib/hisi-mali/*
+/usr/local/lib/hisi-nmfix/*
+/usr/local/lib/hisi-treeland/*
+/usr/local/lib/hisi-wpa/*
+/etc/systemd/system/treeland.service.d/l540-no-rt.conf
+/etc/systemd/system/treeland.service.d/l541-malibuf.conf
+/etc/systemd/system/wpa_supplicant.service.d/hisi.conf
+/etc/systemd/system/hciattach.service.d/hisi.conf
+/etc/systemd/system/NetworkManager.service.d/hisi-station-fix.conf
+/etc/systemd/system/hisi-ddm-watchdog.service
+/etc/NetworkManager/conf.d/90-l540-hisi.conf
+/etc/NetworkManager/conf.d/wifi-powersave-off.conf
+/etc/systemd/resolved.conf.d/l540-fallback-dns.conf
+/etc/glvnd/egl_vendor.d/10_hisi_mali.json
+/etc/X11/default-display-manager
+/usr/bin/fingerprint_daemon
+unowned:/usr/lib/*.so*
+noauto:/usr/lib/box64-x86_64-linux-gnu/*
+noauto:/etc/box64.box64rc
+noauto:/etc/binfmt.d/box64.conf

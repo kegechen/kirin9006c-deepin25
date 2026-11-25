@@ -1,0 +1,2 @@
+# libEGL_hisi_mali 黑名单：每行一个程序名（如 deepin-music）或完整路径，列出的程序不用 libmali、交给 Mesa。
+# 全局关闭：touch /etc/hisi-mali/egl-off；单次关闭：HISI_MALI_DISABLE=1 程序名；看决策：HISI_MALI_DEBUG=1 程序名
