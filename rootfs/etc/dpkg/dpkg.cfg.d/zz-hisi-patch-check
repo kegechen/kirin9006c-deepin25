@@ -1,0 +1,3 @@
+# hisi-patch-check：每次 dpkg 运行后登记一次延时自检（hisi-patch-check-dpkg.service 会等事务结束再跑）。
+# 控制中心更新（lastore）会清掉 apt 的 DPkg::Post-Invoke 钩子，所以要在 dpkg 这一层挂。绝不能让 dpkg 失败。
+post-invoke="systemctl start --no-block hisi-patch-check-dpkg.service >/dev/null 2>&1 || true"

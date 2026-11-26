@@ -1,0 +1,9 @@
+[Unit]
+Description=deepin 开机正常后把下次开机设回 deepin（UOS Boot 分区 grubenv next_entry）
+After=ddm.service
+
+[Service]
+Type=oneshot
+# 开机成功的判据：ddm（登录界面）仍在运行。卡死的开机走不到这里，next_entry 用掉后就回 UOS。
+ExecCondition=/usr/bin/systemctl is-active --quiet ddm.service
+ExecStart=/usr/local/sbin/hisi-next-boot auto

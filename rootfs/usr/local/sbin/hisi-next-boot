@@ -1,0 +1,64 @@
+#!/bin/sh
+# hisi-next-boot：管理“下次开机进哪个系统”（改 UOS Boot 分区 grubenv 里的一次性启动项 next_entry）。
+#
+# 思路：grub 默认启动项始终是 UOS；deepin 每次正常开机（ddm 起来 2 分钟后，由 hisi-next-boot.timer 触发 auto）
+# 都把 next_entry 设成 deepin25-rootb，所以平时重启一直回 deepin。万一哪次 deepin 开机卡死，
+# 长按电源重启时 next_entry 已被 grub 用掉，自动回到 UOS，不会卡死循环。
+#
+# 用法（root）：
+#   hisi-next-boot            查看当前 next_entry
+#   hisi-next-boot uos        下次重启进 UOS（本次开机内 auto 也不再改回来）
+#   hisi-next-boot deepin     下次重启进 deepin
+#   hisi-next-boot auto       timer 调用；/etc/hisi-next-boot.off 存在时不动（关闭“默认 deepin”）
+# UOS 下想回 deepin：sudo grub-reboot <启动项>（Rootb 是 deepin25-rootb，装在 U 盘上是 deepin25-usb）
+# 启动项和 UOS Boot 分区取自 boot-custom.meta 的 entry= / uuid=（install-deepin25.sh 会写好）
+set -eu
+META=/usr/local/lib/hisi-patch/meta/boot-custom.meta
+UUID=$(sed -n 's/^uuid=//p' "$META" 2>/dev/null || true)
+[ -n "$UUID" ] || UUID=87718359-86c5-433b-84dd-44f9b1b50707
+ENTRY=$(sed -n 's/^entry=//p' "$META" 2>/dev/null || true)
+[ -n "$ENTRY" ] || ENTRY=deepin25-rootb
+DEV=/dev/disk/by-uuid/$UUID
+HOLD=/run/hisi-next-boot.uos
+OFF=/etc/hisi-next-boot.off
+
+[ "$(id -u)" = 0 ] || { echo "需要 root：sudo $0 $*"; exit 1; }
+[ -b "$DEV" ] || { echo "找不到 UOS Boot 分区 $DEV"; exit 1; }
+
+M=; MOUNTED=
+cleanup() { if [ -n "$MOUNTED" ]; then umount "$M"; fi; if [ -n "$M" ]; then rmdir "$M"; fi; }
+trap cleanup EXIT
+bootmnt() {  # 已挂载就直接用，否则临时挂到 /run 下
+  M0=$(findmnt -nro TARGET -S "UUID=$UUID" | head -1)
+  if [ -n "$M0" ]; then GE=$M0/grub/grubenv; return; fi
+  M=$(mktemp -d /run/hisi-next-boot.XXXXXX)
+  mount -o "${1:-ro},nodev,nosuid,noexec" "$DEV" "$M"; MOUNTED=1
+  GE=$M/grub/grubenv
+}
+cur() { grub-editenv "$GE" list | sed -n 's/^next_entry=//p'; }
+
+case "${1:-status}" in
+  status)
+    bootmnt ro; c=$(cur)
+    if [ "$c" = "$ENTRY" ]; then echo "下次开机：deepin（next_entry=$c）"; else echo "下次开机：UOS（next_entry=${c:-空}）"; fi
+    [ -e "$OFF" ] && echo "（$OFF 存在：auto 不会自动设回 deepin）"
+    exit 0 ;;
+  uos)
+    : > "$HOLD"; bootmnt rw
+    grub-editenv "$GE" unset next_entry
+    echo "下次开机：UOS（本次开机内不会再自动改回 deepin）" ;;
+  deepin)
+    rm -f "$HOLD"; bootmnt rw
+    grub-editenv "$GE" set next_entry=$ENTRY
+    echo "下次开机：deepin" ;;
+  auto)
+    [ -e "$OFF" ] && exit 0
+    [ -e "$HOLD" ] && exit 0
+    bootmnt ro; c=$(cur)
+    [ "$c" = "$ENTRY" ] && exit 0
+    if [ -n "$MOUNTED" ]; then umount "$M"; MOUNTED=; rmdir "$M"; M=; fi
+    bootmnt rw
+    grub-editenv "$GE" set next_entry=$ENTRY
+    echo "deepin 开机正常，已设置下次开机仍进 deepin（next_entry=$ENTRY）" ;;
+  *) sed -n '2,15p' "$0"; exit 2 ;;
+esac

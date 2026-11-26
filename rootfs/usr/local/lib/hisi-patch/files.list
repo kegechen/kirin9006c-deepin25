@@ -3,8 +3,16 @@
 # 前缀 noauto:  = 只检测、--fix 不自动恢复（非本方文件，如 build-env agent 的 box64）。
 # 修改本文件（或有意识地改过补丁）之后，运行 `hisi-patch-check snapshot` 重建黄金副本。
 /usr/local/sbin/*
+# /usr/sbin/init 已 dpkg-divert 成 init.systemd，这里是指向 d25-init 的相对符号链接（UOS initrd 会忽略 init= 参数）
+/usr/sbin/init
 /usr/local/bin/hciattach-hisi
 noauto:/usr/local/bin/box64
+# 天气壁纸 treeland 扩展（WeatherWallpaper 仓库 linux/install.sh 安装；没装时 snapshot 会跳过这几条）
+# metadata.json 已 dpkg-divert 到 metadata.json.deepin，这里是“原列表 + wwp 壁纸包”的合并结果
+/usr/local/bin/treeland-wallpaper-factory
+/usr/local/bin/wwp-set
+/usr/local/share/wallpapers/wwp/*/*
+/usr/share/wallpapers/deepin-livewallpapers/metadata.json
 /usr/local/lib/hisi-mali/*
 /usr/local/lib/hisi-nmfix/*
 /usr/local/lib/hisi-treeland/*
@@ -15,6 +23,15 @@ noauto:/usr/local/bin/box64
 /etc/systemd/system/hciattach.service.d/hisi.conf
 /etc/systemd/system/NetworkManager.service.d/hisi-station-fix.conf
 /etc/systemd/system/hisi-ddm-watchdog.service
+/etc/systemd/system/hisi-patch-check.service
+/etc/systemd/system/hisi-patch-check-dpkg.service
+/etc/dpkg/dpkg.cfg.d/zz-hisi-patch-check
+/etc/systemd/system/hisi-next-boot.service
+/etc/systemd/system/hisi-next-boot.timer
+/etc/systemd/system/hisi-patch-firstboot.service
+/usr/local/lib/hisi-patch/apt-pre-hook
+/usr/local/lib/hisi-patch/wait-dpkg-idle
+/etc/systemd/system/ddm.service.d/hisi-seatd-wait.conf
 /etc/NetworkManager/conf.d/90-l540-hisi.conf
 /etc/NetworkManager/conf.d/wifi-powersave-off.conf
 /etc/systemd/resolved.conf.d/l540-fallback-dns.conf

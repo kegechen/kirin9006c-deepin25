@@ -4,4 +4,6 @@
 # sha256 由 sudo hisi-patch-check snapshot 自动填写。
 uuid=<BOOT_UUID>
 path=/grub/custom.cfg
+# 启动项 id（hisi-next-boot 也读它）：Rootb 是 deepin25-rootb，装在 U 盘上是 deepin25-usb
+entry=deepin25-rootb
 sha256=

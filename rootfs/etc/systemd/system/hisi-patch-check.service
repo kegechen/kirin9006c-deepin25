@@ -5,6 +5,8 @@ After=multi-user.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/hisi-patch-check --apt-hook
+# 退出码 2 = 仅警告（多为包版本变化，已发桌面通知），不算单元失败，免得开机刷 “Failed to start” 和 degraded
+SuccessExitStatus=2
 
 [Install]
 WantedBy=multi-user.target

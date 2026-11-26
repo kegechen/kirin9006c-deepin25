@@ -1,0 +1,9 @@
+[Unit]
+Description=开机 2 分钟后确认 deepin 正常并设置下次开机仍进 deepin
+
+[Timer]
+OnBootSec=2min
+Unit=hisi-next-boot.service
+
+[Install]
+WantedBy=timers.target

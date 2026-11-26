@@ -70,7 +70,7 @@ FIXED=0
 RESTART=""
 REPORT=""; TMPF=""; TMPF2=""
 
-# ---------- 输出辅助 ----------
+# 输出辅助
 note() { printf '%s\n' "$*" >> "$REPORT"; [ $QUIET = 0 ] && printf '%s\n' "$*"; return 0; }
 say()  { printf '%s\n' "$*" >> "$REPORT"; printf '%s\n' "$*"; }
 ok()   { N_OK=$((N_OK+1));   note "  [OK]   $1"; }
@@ -87,7 +87,7 @@ compute_code(){
   else echo 0; fi
 }
 
-# ---------- 文件清单展开（files.list -> “flag 路径”列表） ----------
+# 文件清单展开（files.list -> “flag 路径”列表）
 # 前缀：unowned: 只纳入 dpkg 不拥有的文件；noauto: 只检测不自动恢复（非本方文件）
 expand_list(){
   local line entry unowned noauto flag f
@@ -112,7 +112,7 @@ expand_list(){
   done < "$FILES_LIST"
 }
 
-# ---------- 恢复单个文件（含现场备份） ----------
+# 恢复单个文件（含现场备份）
 fixfile(){  # $1=路径 $2=类型(file/link) $3=sha256或链接目标
   local live="$ROOT$1" gold="$GOLDEN$1" bk="$BKBASE/$STAMP$1"
   mkdir -p "$(dirname "$bk")" "$(dirname "$live")"
@@ -151,7 +151,7 @@ fixfile(){  # $1=路径 $2=类型(file/link) $3=sha256或链接目标
   fi
 }
 
-# ---------- 检查项 1：文件与符号链接 ----------
+# 检查项 1：文件与符号链接
 check_files(){
   note "-- 补丁文件（与黄金副本逐个比对） --"
   local ftype fmode fhash fpath live gold st msg t h m
@@ -201,7 +201,7 @@ check_files(){
   done < <(expand_list)
 }
 
-# ---------- 检查项 2：fstab 受保护行（/data bind + Roota + 根UUID + swap） ----------
+# 检查项 2：fstab 受保护行（/data bind + Roota + 根UUID + swap）
 check_fstab(){
   note "-- /etc/fstab（Rootb/data/Roota 相关行，逐行比对） --"
   [ -f "$FSTAB_BASELINE" ] || { skp "无 fstab 基线（先 snapshot）"; return; }
@@ -228,7 +228,7 @@ check_fstab(){
   fi
 }
 
-# ---------- 检查项 3：/etc/hosts 内网解析行 ----------
+# 检查项 3：/etc/hosts 内网解析行
 check_hosts(){
   note "-- /etc/hosts（内网解析行，逐行比对） --"
   [ -f "$HOSTS_BASELINE" ] || { skp "无 hosts 基线"; return; }
@@ -255,12 +255,14 @@ check_hosts(){
   fi
 }
 
-# ---------- 检查项 4：UOS Boot 分区 grub 入口 custom.cfg（debugfs 只读） ----------
+# 检查项 4：UOS Boot 分区 grub 入口 custom.cfg（debugfs 只读）
 check_custom(){
-  note "-- UOS Boot 分区 /grub/custom.cfg（deepin25-rootb 引导入口） --"
+  local uuid cpath want entry
+  entry=$(grep '^entry=' "$CUSTOM_META" 2>/dev/null | cut -d= -f2-)
+  [ -n "$entry" ] || entry=deepin25-rootb
+  note "-- UOS Boot 分区 /grub/custom.cfg（$entry 引导入口） --"
   if [ $TESTROOT = 1 ]; then skp "测试根模式，跳过（该文件在真实 UOS Boot 分区上，演练不涉及）"; return; fi
   [ -f "$CUSTOM_META" ] || { skp "无 boot-custom.meta"; return; }
-  local uuid cpath want
   uuid=$(grep  '^uuid='   "$CUSTOM_META" | cut -d= -f2)
   cpath=$(grep '^path='  "$CUSTOM_META" | cut -d= -f2-)
   want=$(grep '^sha256=' "$CUSTOM_META" | cut -d= -f2-)
@@ -273,12 +275,12 @@ check_custom(){
   if [ -z "$content" ]; then wrn "debugfs 读取 custom.cfg 失败，无法校验 grub 入口"; return; fi
   h=$(printf '%s\n' "$content" | sha256sum | cut -d' ' -f1)
   if [ "$h" = "$want" ]; then
-    ok "custom.cfg 内容与基线一致（含 deepin25-rootb 入口）"
+    ok "custom.cfg 内容与基线一致（含 $entry 入口）"
   else
-    if printf '%s\n' "$content" | grep -q "deepin25-rootb"; then
-      chg "custom.cfg 内容被改动（哈希不匹配，但仍含 deepin25-rootb 入口）"
+    if printf '%s\n' "$content" | grep -q "'$entry'"; then
+      chg "custom.cfg 内容被改动（哈希不匹配，但仍含 $entry 入口）"
     else
-      chg "custom.cfg 被改动/覆盖，deepin25-rootb 入口丢失（重启会回不到 deepin25！）"
+      chg "custom.cfg 被改动/覆盖，$entry 入口丢失（重启会回不到 deepin25！）"
     fi
     if [ $FIX = 1 ]; then
       if findmnt -rn -S "$dev" >/dev/null 2>&1; then
@@ -308,11 +310,12 @@ check_custom(){
   fi
 }
 
-# ---------- 检查项 5：systemd 开机状态、服务环境与指纹/TEE 守护 ----------
+# 检查项 5：systemd 开机状态、服务环境与指纹/TEE 守护
 check_state(){
   note "-- 系统状态（systemctl / elfverify，只读；--fix 仅改 enable/disable 与授权的恢复动作） --"
   local ue u want cur e x miss l act
-  for ue in ddm:enabled lightdm:disabled d25-bootguard.service:disabled d25-netguard.service:disabled hwfp_init.service:enabled hisi-ddm-watchdog.service:enabled; do
+  # d25-bootguard 不查：一键装机默认启用它（开机兜底），用户可以自己 disable，两种状态都正常
+  for ue in ddm:enabled lightdm:disabled d25-netguard.service:disabled hwfp_init.service:enabled hisi-ddm-watchdog.service:enabled; do
     u=${ue%%:*}; want=${ue#*:}
     cur=$(systemctl is-enabled "$u" 2>/dev/null) || true
     if [ -z "$cur" ]; then skp "$u 不存在或无法查询"; continue; fi
@@ -411,7 +414,7 @@ check_state(){
   fi
 }
 
-# ---------- 检查项 6：libwaylib-wlroots ELF 符号（升级后最容易静默失效） ----------
+# 检查项 6：libwaylib-wlroots ELF 符号（升级后最容易静默失效）
 check_elf(){
   note "-- ELF 兼容性（libwaylib-wlroots.so.0.20 导出符号） --"
   # 该库属于 treeland 包，不是补丁文件：演练（HISI_PATCH_ROOT）时仍查真实系统（只读）
@@ -431,7 +434,7 @@ check_elf(){
   nmout=$(nm -D --defined-only "$real" 2>/dev/null) || true
   miss=""
   for s in $WL_SYMS; do
-    printf '%s\n' "$nmout" | grep -qE " $s\$" || miss="$miss $s"
+    grep -qE " $s\$" <<< "$nmout" || miss="$miss $s"   # here-string：grep -q 提前退出时不会让 printf 报 Broken pipe
   done
   if [ -z "$miss" ]; then
     ok "9 个关键 wlr_* 符号全部导出"
@@ -440,7 +443,7 @@ check_elf(){
   fi
 }
 
-# ---------- 检查项 7：包版本基线 ----------
+# 检查项 7：包版本基线
 check_packages(){
   note "-- 软件包基线（版本变化=警告需复核；被卸载=报警） --"
   [ -f "$PKG_BASELINE" ] || { skp "无包版本基线（先 snapshot）"; return; }
@@ -463,7 +466,7 @@ check_packages(){
   done < "$PKG_BASELINE"
 }
 
-# ---------- 检查项 8：box64 binfmt 注册（运行时） ----------
+# 检查项 8：box64 binfmt 注册（运行时）
 check_binfmt(){
   note "-- box64 binfmt 注册（x86_64 模拟） --"
   if [ ! -e "$ROOT/usr/local/bin/box64" ] && [ ! -e "$ROOT/etc/binfmt.d/box64.conf" ]; then skp "未安装 box64"; return; fi
@@ -488,7 +491,7 @@ check_binfmt(){
   fi
 }
 
-# ---------- 检查项 9：用户态 EGL 垫片开关（/etc/hisi-mali） ----------
+# 检查项 9：用户态 EGL 垫片开关（/etc/hisi-mali）
 check_glvendor(){
   note "-- 用户态 EGL 垫片开关（/etc/hisi-mali） --"
   local d="$ROOT/etc/hisi-mali"
@@ -505,7 +508,7 @@ check_glvendor(){
   fi
 }
 
-# ---------- 检查项 10：用户会话 GPU 路径（dde-shell 已加载 libmali） ----------
+# 检查项 10：用户会话 GPU 路径（dde-shell 已加载 libmali）
 check_usersession(){
   note "-- 用户会话 GPU 路径（dde-shell 进程 maps） --"
   if [ -e "$ROOT/etc/hisi-mali/egl-off" ]; then
@@ -524,7 +527,7 @@ check_usersession(){
   fi
 }
 
-# ---------- 检查项 11：动态壁纸重编码（调用工具自带的 --check，只读） ----------
+# 检查项 11：动态壁纸重编码（调用工具自带的 --check，只读）
 check_wallpaper(){
   note "-- 动态壁纸重编码（hisi-wallpaper-reencode --check） --"
   local tool="$ROOT$WALLPAPER_TOOL" out rc
@@ -538,7 +541,7 @@ check_wallpaper(){
   esac
 }
 
-# ---------- 检查项 12：treeland 运行时（尽力而为） ----------
+# 检查项 12：treeland 运行时（尽力而为）
 check_runtime(){
   note "-- 运行时（treeland 进程已加载的库） --"
   [ $TESTROOT = 1 ] && { skp "测试根模式，跳过"; return; }
@@ -559,7 +562,7 @@ check_runtime(){
   fi
 }
 
-# ---------- 检查项 13：风险提示 ----------
+# 检查项 13：风险提示
 check_risks(){
   note "-- 风险项 --"
   if [ -e "$ROOT/etc/kernel/postinst.d/zz-update-grub" ]; then
@@ -575,7 +578,7 @@ check_risks(){
   fi
 }
 
-# ---------- 全量检查 ----------
+# 全量检查
 run_all_checks(){
   check_files
   check_fstab
@@ -592,7 +595,7 @@ run_all_checks(){
   check_risks
 }
 
-# ---------- fix 收尾：daemon-reload（不重启图形/网络服务） ----------
+# fix 收尾：daemon-reload（不重启图形/网络服务）
 finish_fix(){
   [ $FIXED = 1 ] || return 0
   [ $TESTROOT = 1 ] && { say "（测试根模式：不执行 daemon-reload、不动系统状态）"; return 0; }
@@ -622,7 +625,7 @@ print_restart_list(){
   esac
 }
 
-# ---------- 日志与桌面通知 ----------
+# 日志与桌面通知
 writelog(){
   local code=$1
   {
@@ -642,7 +645,7 @@ notify_desktop(){
     notify-send -u critical "$title" "$body" >/dev/null 2>&1 || true
 }
 
-# ---------- snapshot：重建黄金副本与全部基线（可反复重跑） ----------
+# snapshot：重建黄金副本与全部基线（可反复重跑）
 do_snapshot(){
   say "== hisi-patch-check snapshot：重建黄金副本与基线 =="
   if [ $TESTROOT = 1 ]; then say "错误：snapshot 不能在 HISI_PATCH_ROOT 测试根下运行（基线必须来自真实系统）"; exit 3; fi
@@ -728,7 +731,7 @@ do_snapshot(){
   say "== snapshot 完成：跟踪 $nfile 个文件（符号链接 $nlink）、$npkg 个敏感包、fstab $nfline 行，跳过条目 $skipped =="
 }
 
-# ---------- 主流程 ----------
+# 主流程
 main(){
   [ -d /run/lock ] || mkdir -p /run/lock
   exec 9>"$LOCK"

@@ -1,0 +1,13 @@
+[Unit]
+Description=hisi-patch-check：dpkg 事务结束后自检（由 /etc/dpkg/dpkg.cfg.d/zz-hisi-patch-check 触发）
+# 控制中心更新（lastore）用的 apt 配置会 #clear 掉 apt 的 DPkg::Post-Invoke 钩子，dpkg 自己的 post-invoke 不受影响。
+# 每次 dpkg 运行后都会 start 本服务；已在排队/运行时 start 会合并，一次事务只检查一次。
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/local/lib/hisi-patch/wait-dpkg-idle
+ExecStart=/usr/local/sbin/hisi-patch-check --apt-hook
+# 退出码 2 = 仅警告（已发桌面通知），不算失败
+SuccessExitStatus=2
+TimeoutStartSec=3h
+Nice=10

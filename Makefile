@@ -51,20 +51,31 @@ install: all
 	install -m 644 src/hisi-mali-egl.c src/mali-compat.c src/tl-malibuf.c $(DESTDIR)$(MALI_DIR)/
 	install -m 644 src/tl-norender.c $(DESTDIR)/usr/local/lib/hisi-treeland/
 	install -m 644 src/nm-station-fix.c $(DESTDIR)/usr/local/lib/hisi-nmfix/
-	cd rootfs && find . -type f ! -path './usr/local/sbin/*' ! -name apt-pre-hook ! -name egl-deny \
+	cd rootfs && find . -type f ! -path './usr/local/sbin/*' ! -name apt-pre-hook ! -name wait-dpkg-idle ! -name egl-deny \
 		-exec install -D -m 644 {} $(DESTDIR)/{} \;
 	cd rootfs && find ./usr/local/sbin -type f -exec install -D -m 755 {} $(DESTDIR)/{} \;
 	install -D -m 755 rootfs/usr/local/lib/hisi-patch/apt-pre-hook $(DESTDIR)/usr/local/lib/hisi-patch/apt-pre-hook
+	install -D -m 755 rootfs/usr/local/lib/hisi-patch/wait-dpkg-idle $(DESTDIR)/usr/local/lib/hisi-patch/wait-dpkg-idle
 	test -e $(DESTDIR)/etc/hisi-mali/egl-deny || install -D -m 644 rootfs/etc/hisi-mali/egl-deny $(DESTDIR)/etc/hisi-mali/egl-deny
-	@echo
-	@echo "已安装。接下来（见 README“安装”一节）："
-	@echo "  sudo systemctl daemon-reload"
-	@echo "  sudo systemctl enable --now hisi-ddm-watchdog.service hisi-patch-check.timer"
-	@echo "  sudo systemctl enable hisi-patch-check.service"
-	@echo "  sudo systemctl restart NetworkManager wpa_supplicant treeland   # treeland 重启会回到锁屏"
-	@echo "  sudo hisi-patch-check snapshot"
+	@[ -n "$(NOHINT)" ] || { echo; \
+	  echo "已安装。接下来（见 README“安装”一节）："; \
+	  echo "  sudo systemctl daemon-reload"; \
+	  echo "  sudo systemctl enable --now hisi-ddm-watchdog.service hisi-patch-check.timer"; \
+	  echo "  sudo systemctl enable hisi-patch-check.service"; \
+	  echo "  sudo systemctl restart NetworkManager wpa_supplicant treeland   # treeland 重启会回到锁屏"; \
+	  echo "  sudo hisi-patch-check snapshot"; }
 
 clean:
 	rm -rf $(B)
 
-.PHONY: all install clean
+# 只删本仓库装的文件，不动厂商 blob、用户信息、壁纸补丁和已生成的基线
+uninstall:
+	rm -f $(DESTDIR)$(MALI_DIR)/libEGL_hisi_mali.so.0 $(DESTDIR)$(MALI_DIR)/libmali-compat.so \
+		$(DESTDIR)$(MALI_DIR)/libtl-malibuf.so $(DESTDIR)/usr/local/lib/hisi-treeland/libtl-norender.so \
+		$(DESTDIR)/usr/local/lib/hisi-nmfix/libnm-station-fix.so
+	cd rootfs && find . -type f ! -path './usr/local/sbin/*' ! -name apt-pre-hook ! -name wait-dpkg-idle \
+		-exec rm -f $(DESTDIR)/{} \;
+	cd rootfs && find ./usr/local/sbin -type f -exec rm -f $(DESTDIR)/{} \;
+	@echo "已移除补丁文件；/usr/local/lib/hisi-mali 里的厂商 blob 和基线未动，确认后再重启服务。"
+
+.PHONY: all install clean uninstall

@@ -1,0 +1,21 @@
+#!/bin/sh
+# hisi-patch-check-dpkg.service 的 ExecStartPre：等 apt/dpkg 事务彻底结束再自检。
+# 判据：没有 dpkg 进程，且 dpkg 前端锁、dpkg 锁都没人持有（看 /proc/locks 里有没有这两个文件的 inode），
+# 连续 20 秒都如此才返回。一次 apt/lastore 事务会调好几次 dpkg，中间短暂空档不算结束。
+busy() {
+  pgrep -x dpkg >/dev/null 2>&1 && return 0
+  for f in /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock; do
+    [ -e "$f" ] || continue
+    i=$(stat -c %i "$f" 2>/dev/null) || continue
+    grep -q ":$i " /proc/locks && return 0
+  done
+  return 1
+}
+# apt 钩子会 systemctl stop 掉排队中的本服务（由它当场检查）：被 TERM 时正常退出，免得单元记成 failed
+trap 'exit 0' TERM INT
+q=0
+while [ $q -lt 20 ]; do
+  if busy; then q=0; else q=$((q+2)); fi
+  sleep 2
+done
+exit 0

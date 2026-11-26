@@ -22,6 +22,9 @@ dde-shell
 dde-control-center
 libmpv2
 mpv
+# 自编壁纸 factory（/usr/local/bin/treeland-wallpaper-factory）链接了 Qt WebEngine，被卸载壁纸就起不来
+libqt6webenginecore6
+libqt6webenginequick6
 systemd
 systemd-resolved
 libc6

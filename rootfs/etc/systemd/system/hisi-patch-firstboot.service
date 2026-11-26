@@ -1,0 +1,13 @@
+[Unit]
+Description=hisi-patch-check：还没有补丁基线时（新装的系统第一次开机）建立基线
+# install-deepin25.sh 装机时 enable。已有基线就什么都不做，所以留着 enable 也无妨。
+ConditionPathExists=!/usr/local/lib/hisi-patch/meta/manifest.tsv
+After=local-fs.target
+Before=hisi-patch-check.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hisi-patch-check snapshot
+
+[Install]
+WantedBy=multi-user.target

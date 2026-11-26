@@ -6,17 +6,80 @@
 # deepin 没有这个守护进程，systemd 255 第一次 posix_spawn systemd-executor 时，子进程在 access_verify 里永久等待，
 # PID1 跟着卡在 vfork 里（2026-11-24 用 d25-init-probe 抓到的内核栈）。所以在 exec systemd 之前先写 0。
 # 注意：必须用 printf 0（不带换行），echo 0 会返回 I/O error。
+#
+# 2026-11-25 加固：elfverify 关掉之前不能 exec 任何外部程序（execve 会卡在 access_verify 里），
+# 所以回读状态、读内核参数都只用 shell 内建（printf/echo/read/case/test）。
+#
+# 2026-11-25 入口改成 /sbin/init：UOS initrd 的 uos_config_init 只有在 <新根>/boot/grub/grub.cfg 含 ^password_pbkdf2
+# （grub 菜单加密）时才认 init= 参数，否则强制 /sbin/init。Rootb 原本没有这个文件（grep 出错，条件不成立，init= 碰巧有效），
+# 但 deepin-grub2（打开控制中心就会被拉起）会在 Rootb 生成一份，之后 init= 被忽略、elfverify 没关、systemd 卡死。
+# 所以 Rootb 上用 dpkg-divert 把 systemd-sysv 的 /usr/sbin/init 改名成 /usr/sbin/init.systemd，
+# 再放符号链接 /usr/sbin/init -> ../local/sbin/d25-init（用相对路径，避免 initrd 的 run-init 按 initrd 的根解析）。
+# grub 里的 init= 留着也无妨。本脚本最后 exec 的是 /usr/lib/systemd/systemd 本体，不会绕回自己。
+#
+# 排查开机卡死的调试模式：存在 /etc/d25-bootlog 时启用（根分区只读也能读到这个标志）
+#   1. 足迹：每一步写进 kmsg、屏幕（/dev/console）、swap 分区开头 1KB 的引导区（swap 头从 1024 字节开始，
+#      这块 Linux 不用；fd 9 由所有子进程共享偏移，依次追加，每个进程最多 6 行、每行最多 100 字节）。
+#   2. 看门狗：纯内建命令的子进程，开机 150 秒时根分区若还是只读，就把每个进程的状态/系统调用/内核栈
+#      写进 kmsg、sysrq w，再 sysrq s 同步、sysrq b 热重启（grub 一次性启动项已用掉，会回到 UOS）。
+#      控制台日志会进 ramoops 的 pstore 控制台缓冲，回到 UOS 后看 /sys/fs/pstore/。
+#   3. 开机日志：kmsg（含 systemd 的 debug 日志）和每 10 秒的进程快照写到 /data/deepin25-bootlog/<时间>/。
+#      systemd 校正时钟之前 date 比北京时间快 8 小时（RTC 存的是本地时间），目录名以此为准。
 S=/sys/kernel/security/elfverify/status
+DBG=; [ -e /etc/d25-bootlog ] && DBG=1
+BCOK=; BCN=0
+up() { read -r UP _ < /proc/uptime; }
+bc() {
+  up
+  echo "<3>d25-init: $UP $*" > /dev/kmsg 2>/dev/null
+  [ -n "$DBG" ] || return 0
+  echo "d25-init: $UP $*" > /dev/console 2>/dev/null
+  [ -n "$BCOK" ] || return 0
+  BCN=$((BCN+1))
+  [ $BCN -le 6 ] || return 0
+  printf '%.100s\n' "$UP $*" >&9 2>/dev/null
+}
+
+if [ -n "$DBG" ]; then
+  echo on > /proc/sys/kernel/printk_devkmsg 2>/dev/null
+  BCDEV=
+  while read -r d m t _; do [ "$t" = swap ] && BCDEV=$d; done < /etc/fstab
+  case "$BCDEV" in UUID=*) BCDEV=/dev/disk/by-uuid/${BCDEV#UUID=};; esac
+  if [ -b "$BCDEV" ] && [ -w "$BCDEV" ]; then
+    exec 9<>"$BCDEV"
+    BCOK=1
+  fi
+fi
+bc "start"
+
 [ -e $S ] || mount -t securityfs securityfs /sys/kernel/security 2>/dev/null
+EV=absent
 if [ -e $S ]; then
-  printf 0 > $S 2>/dev/null
-  echo "d25-init: elfverify status=$(cat $S 2>/dev/null)" > /dev/kmsg 2>/dev/null
+  n=0
+  while :; do
+    n=$((n+1))
+    printf 0 > $S 2>/dev/null
+    EV=unreadable
+    read -r EV 2>/dev/null < $S
+    if [ "$EV" = 0 ] || [ $n -ge 20 ]; then break; fi
+  done
+  bc "elfverify=$EV tries=$n"
+  if [ "$EV" = 1 ]; then
+    # 关不掉就别往下走了（systemd 一定会卡死），同步后立即重启；grub 的一次性启动项已用掉，会回到默认的 UOS
+    bc "elfverify 关闭失败，重启"
+    echo s > /proc/sysrq-trigger
+    up; t=$((${UP%.*}+3)); while up; [ "${UP%.*}" -lt $t ]; do :; done
+    echo b > /proc/sysrq-trigger
+  fi
 fi
 
+read -r CMDLINE < /proc/cmdline
+
 # 内核参数带 d25.probe=1 时留一个探针：90 秒后 PID1 若还卡在 clone（syscall 220），抓栈写日志后 sysrq 重启
-case " $(cat /proc/cmdline) " in
+case " $CMDLINE " in
 *" d25.probe=1 "*)
   (
+    exec 9>&-
     sleep 90
     case "$(cat /proc/1/syscall 2>/dev/null)" in 220\ *) ;; *) exit 0;; esac
     mount -o remount,rw / 2>/dev/null
@@ -36,4 +99,88 @@ case " $(cat /proc/cmdline) " in
   ) &
   ;;
 esac
-exec /usr/lib/systemd/systemd "$@"
+
+LOGARGS=
+if [ -n "$DBG" ] && [ "$EV" = 0 ]; then
+  # 看门狗：只用 shell 内建命令（不 exec 任何程序），忙等计时
+  (
+    rootrw() {
+      R=
+      while read -r d m f o _; do [ "$m" = / ] && R=$o; done < /proc/mounts
+      case ",$R," in *,rw,*) return 0;; esac
+      return 1
+    }
+    next=20
+    while :; do
+      up; u=${UP%.*}
+      if [ "$u" -ge "$next" ]; then
+        rootrw && exit 0
+        [ "$u" -ge 150 ] && break
+        next=$((u+5))
+      fi
+    done
+    echo 8 > /proc/sys/kernel/printk
+    bc "WD: 150 秒根分区仍只读，抓现场"
+    NP=0; AV=0
+    for p in /proc/[0-9]*; do
+      [ -e $p/exe ] || continue
+      comm=; read -r comm 2>/dev/null < $p/comm || continue
+      st=; while read -r k v _; do [ "$k" = State: ] && { st=$v; break; }; done 2>/dev/null < $p/status
+      wch=; read -r wch 2>/dev/null < $p/wchan
+      sc=; read -r sc _ 2>/dev/null < $p/syscall
+      stk=; while read -r l; do f=${l#*] }; stk="$stk ${f%%+*}"; done 2>/dev/null < $p/stack
+      case "$stk $wch" in *access_verify*|*elfverify*) AV=$((AV+1));; esac
+      NP=$((NP+1))
+      echo "<3>d25wd: ${p#/proc/} $comm st=$st sc=$sc wchan=$wch stack:$stk" > /dev/kmsg 2>/dev/null
+      [ "${p#/proc/}" = 1 ] && P1="$comm $st sc=${sc} w=$wch:$stk"
+    done
+    bc "WD: np=$NP av=$AV"
+    bc "WD: p1=$P1"
+    echo w > /proc/sysrq-trigger
+    bc "WD: sysrq s+b"
+    echo s > /proc/sysrq-trigger
+    up; t=$((${UP%.*}+5)); while up; [ "${UP%.*}" -lt $t ]; do :; done
+    echo b > /proc/sysrq-trigger
+  ) < /dev/null > /dev/null 2>&1 &
+
+  DATADEV=
+  while read -r dev mp _; do [ "$mp" = /data ] && DATADEV=$dev; done < /etc/fstab
+  if [ -n "$DATADEV" ]; then
+    LOGARGS="--log-level=debug --log-target=kmsg"
+    (
+      L=/run/d25-bootlog
+      mkdir -p $L || exit 0
+      mount -o rw,noatime "$DATADEV" $L || exit 0
+      D=$L/deepin25-bootlog/$(date +%Y%m%d-%H%M%S)
+      mkdir -p $D || exit 0
+      bc "bootlog: /data 已挂载，外部命令能执行"
+      exec 9>&-
+      { echo "elfverify=$EV"; echo "cmdline=$CMDLINE"; echo "uptime=$(cat /proc/uptime)"; ls -la /run/initramfs; } > $D/info.txt 2>&1
+      cat /dev/kmsg > $D/kmsg.txt 2>&1 &
+      KP=$!
+      i=0
+      while [ $i -lt 60 ]; do
+        {
+          echo "===== $(date +%T) uptime $(cat /proc/uptime)"
+          ps -eo pid,ppid,stat,wchan:32,etime,args
+          echo "-- pid1 syscall: $(cat /proc/1/syscall)"
+          cat /proc/1/stack
+          echo "-- D 状态进程的内核栈"
+          ps -eo pid=,stat=,comm= | while read -r pid st comm; do
+            case "$st" in D*) echo "[$pid $comm]"; cat /proc/$pid/stack;; esac
+          done
+          echo "-- systemd jobs"
+          timeout 5 systemctl list-jobs --no-pager
+        } >> $D/ps.txt 2>&1
+        sync
+        sleep 10
+        i=$((i+1))
+      done
+      kill $KP
+      sync
+    ) < /dev/null > /dev/null 2>&1 &
+  fi
+fi
+bc "exec systemd $LOGARGS"
+exec 9>&-
+exec /usr/lib/systemd/systemd $LOGARGS "$@"

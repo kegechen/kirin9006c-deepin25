@@ -55,7 +55,7 @@ static int g_debug;
         }                                                           \
     } while (0)
 
-/* ---------------- wl_proxy_ref/unref/get_refcount（与 mali-compat 相同的实现） ---------------- */
+/* ------ wl_proxy_ref/unref/get_refcount（与 mali-compat 相同的实现） ------ */
 struct wl_proxy_layout {
     const void *interface;
     const void *implementation;
@@ -110,7 +110,7 @@ PUBLIC int wl_proxy_get_refcount(struct wl_proxy *p)
     return (p && proxy_layout_ok(p)) ? ((struct wl_proxy_layout *)p)->refcount : 1;
 }
 
-/* ---------------- 加载 libmali ---------------- */
+/* ------ 加载 libmali ------ */
 static void *g_mali;
 static pthread_once_t g_mali_once = PTHREAD_ONCE_INIT;
 
@@ -211,7 +211,7 @@ static void load_mali(void)
     }
 }
 
-/* ---------------- 错误码：本库自己产生的错误优先返回 ---------------- */
+/* ------ 错误码：本库自己产生的错误优先返回 ------ */
 static __thread EGLint t_err;
 
 static void set_err(EGLint e)
@@ -219,7 +219,7 @@ static void set_err(EGLint e)
     t_err = e;
 }
 
-/* ---------------- 是否认领：进程策略 + 合成器探测 ---------------- */
+/* ------ 是否认领：进程策略 + 合成器探测 ------ */
 static int list_has(const char *list_path, const char *exe, const char *base)
 {
     FILE *f = fopen(list_path, "r");
@@ -322,7 +322,7 @@ static int display_has_mali(struct wl_display *dpy)
     return found;
 }
 
-/* ---------------- vendor 导入函数 ---------------- */
+/* ------ vendor 导入函数 ------ */
 static EGLDisplay vnd_getPlatformDisplay(EGLenum platform, void *native, const EGLAttrib *attrs)
 {
     EGLDisplay d;
@@ -368,7 +368,7 @@ static const char *vnd_getVendorString(int name)
     return name == __EGL_VENDOR_STRING_PLATFORM_EXTENSIONS ? CLIENT_EXTS : NULL;
 }
 
-/* ---------------- 窗口转换：libwayland-egl 的 wl_egl_window -> libmali 自己的 ---------------- */
+/* ------ 窗口转换：libwayland-egl 的 wl_egl_window -> libmali 自己的 ------ */
 struct std_wl_egl_window { /* wayland-egl-backend.h，WL_EGL_WINDOW_VERSION 3 */
     const intptr_t version;
     int            width, height, dx, dy;
@@ -522,7 +522,7 @@ static void after_swap(EGLDisplay dpy, EGLSurface s)
     pthread_mutex_unlock(&g_lock);
 }
 
-/* ---------------- 属性表转换 ---------------- */
+/* ------ 属性表转换 ------ */
 static EGLint *attrib_to_int(const EGLAttrib *attrs, EGLint *small, size_t cap)
 {
     size_t  n = 0;
@@ -548,7 +548,7 @@ static EGLint *attrib_to_int(const EGLAttrib *attrs, EGLint *small, size_t cap)
             free(a);                  \
     } while (0)
 
-/* ---------------- 需要特殊处理的 EGL 入口 ---------------- */
+/* ------ 需要特殊处理的 EGL 入口 ------ */
 static EGLint w_eglGetError(void)
 {
     EGLint e = t_err;
@@ -767,7 +767,7 @@ static EGLBoolean w_eglWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags)
     return M.WaitSyncKHR ? (EGLBoolean)M.WaitSyncKHR(dpy, sync, flags) : EGL_FALSE;
 }
 
-/* ---------------- 其余 EGL 1.4 核心函数：直接转给 libmali ---------------- */
+/* ------ 其余 EGL 1.4 核心函数：直接转给 libmali ------ */
 #define FWD(ret, fail, name, params, args)                  \
     static ret w_##name params                              \
     {                                                       \

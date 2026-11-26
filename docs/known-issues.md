@@ -1,5 +1,13 @@
 # 已知问题和注意事项
 
+## ddm 0.4：开机偶发不出登录界面（段错误）
+
+**现象**：开机后屏幕停在控制台或 grub 留下的画面，`systemctl --failed` 里有 `ddm.service`，日志是 `dde-seatd control event socket error: QLocalSocket::ServerNotFoundError "...Invalid name"`，紧接着 `code=killed, signal=SEGV`。
+
+**原因**：`dde-seatd.service` 是 `Type=simple`，ddm 单元里的 `After=dde-seatd.service` 只保证 dde-seatd 进程已经拉起，不保证 `/run/dde-seatd-control.sock` 已经建好。ddm 连不上控制 socket 会直接崩溃，而原单元的 `StartLimitBurst=2`（30 秒）让它开机时连撞两次就被放弃。平时第二次重启多半能连上，开机变慢一点（比如开了 systemd debug 日志）就会两次都撞上。
+
+**处理**：`/etc/systemd/system/ddm.service.d/hisi-seatd-wait.conf` 在启动前最多等 10 秒控制 socket 出现，并把重启间隔改成 1 秒、次数限制放宽到 60 秒 10 次。当场恢复：`sudo systemctl reset-failed ddm; sudo systemctl start ddm`。
+
 ## ddm 0.4：注销后重新登录，锁屏只剩一张不动的壁纸
 
 **现象**：开机后第二次走 Login（手动注销再登录、ddm 重启后登录）时，登录界面没有输入框，只剩一张静止的壁纸；或者报 `Failed to get auth info from display manager`。普通的锁屏解锁（Unlock）不受影响。

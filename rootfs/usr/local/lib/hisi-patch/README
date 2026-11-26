@@ -38,8 +38,15 @@ files.list、fstab 受保护行的规则是按作者机器写的（/data bind �
   /usr/local/lib/hisi-patch/meta/boot-custom.meta   UOS Boot 分区 grub 入口的位置与哈希
   /usr/local/lib/hisi-patch/meta/golden-boot-custom.cfg   grub custom.cfg 黄金副本
   /usr/local/lib/hisi-patch/apt-pre-hook        apt Pre-Install-Pkgs 钩子：装敏感包前终端醒目提示（不阻止）
-  /etc/apt/apt.conf.d/99hisi-patch-check        DPkg::Post-Invoke 调 --apt-hook（|| true，绝不影响 apt）
-  /etc/systemd/system/hisi-patch-check.service  开机 multi-user.target 之后跑一次 --apt-hook
+  /etc/apt/apt.conf.d/99hisi-patch-check        DPkg::Post-Invoke 调 --apt-hook（|| true，绝不影响 apt）；
+                                                先 stop 掉 dpkg 层排队的延时自检，避免同一次更新报两遍
+  /etc/dpkg/dpkg.cfg.d/zz-hisi-patch-check      dpkg post-invoke：每次 dpkg 运行后 start 延时自检服务。
+                                                控制中心更新（lastore）的 apt 配置会 #clear 掉 apt 的
+                                                DPkg::Post-Invoke / Pre-Install-Pkgs，只有这一层能兜住
+  /etc/systemd/system/hisi-patch-check-dpkg.service   延时自检：wait-dpkg-idle 等 dpkg 锁/前端锁空闲
+                                                连续 20 秒后跑一次 --apt-hook（排队中再次 start 会合并）
+  /usr/local/lib/hisi-patch/wait-dpkg-idle      上面服务的 ExecStartPre
+  /etc/systemd/system/hisi-patch-check.service  开机 multi-user.target 之后跑一次 --apt-hook（退出码 2 不算失败）
   /etc/systemd/system/hisi-patch-check.timer    每天跑一次
   /var/log/hisi-patch-check.log                 检查日志（超过 512KB 自动截半）
   /var/backups/hisi-patch/<时间戳>/             --fix 恢复前的现场备份
@@ -65,6 +72,7 @@ files.list、fstab 受保护行的规则是按作者机器写的（/data bind �
   sudo systemctl disable --now hisi-patch-check.timer
   sudo systemctl disable hisi-patch-check.service
   sudo rm /etc/systemd/system/hisi-patch-check.service /etc/systemd/system/hisi-patch-check.timer
+  sudo rm /etc/systemd/system/hisi-patch-check-dpkg.service /etc/dpkg/dpkg.cfg.d/zz-hisi-patch-check
   sudo rm /etc/apt/apt.conf.d/99hisi-patch-check
   sudo rm /usr/local/sbin/hisi-patch-check /usr/local/lib/hisi-patch/apt-pre-hook
   sudo rm -rf /usr/local/lib/hisi-patch
