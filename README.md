@@ -24,12 +24,13 @@
 
 | 功能 | 状态 | 相关文件 |
 |---|---|---|
-| 启动 | 正常；grub 默认仍是 UOS，用 `grub-reboot` 一次性进 deepin | `d25-init`、`examples/grub-custom.cfg` |
+| 启动 | 正常；grub 默认仍是 UOS，deepin 每次正常开机后自动把下次开机设回 deepin，开机卡死则自动回 UOS | `d25-init`、`hisi-next-boot`、`examples/grub-custom.cfg` |
 | Wi‑Fi | 正常 | UOS 的 `wpa_supplicant-hisi`、`libnm-station-fix.so` |
 | 蓝牙 | 正常 | UOS 的 `hciattach-hisi` |
 | 合成器 GPU | treeland 走 Mali-G78，CPU 从约 500%（llvmpipe）降到 3–6% | `libmali-compat.so`、`libtl-norender.so`、treeland drop-in |
 | 客户端 GPU | 任务栏、控制中心、壁纸进程、mpv 等 Wayland 客户端不设环境变量即走 libmali | `libtl-malibuf.so`、`libEGL_hisi_mali.so.0` |
 | 动态壁纸 | 锁屏循环播放，桌面定格（treeland 0.11 的设计）；重编码为 1440p 后解码开销降一半以上 | `hisi-wallpaper-reencode` |
+| 开机登录界面 | ddm 0.4 抢在 dde-seatd 建好控制 socket 前启动会段错误，drop-in 先等 socket 再启动 | `ddm.service.d/hisi-seatd-wait.conf` |
 | 注销后重新登录 | ddm 0.4 偶发卡死，由看门狗自动恢复 | `hisi-ddm-watchdog` |
 | 补丁被升级覆盖 | apt 钩子 + 每日定时检查，异常时桌面通知，可一键恢复 | `hisi-patch-check` |
 | 指纹 | sudo/polkit 可用；锁屏和登录界面只能输密码 | 见 [docs/known-issues.md](docs/known-issues.md) |
@@ -49,6 +50,7 @@
 ## 目录结构
 
 ```text
+install-deepin25.sh       一键装机（在 UOS 下运行，见下文“一键装机”）
 src/                      垫片源码（在目标机上编译）
   hisi-mali-egl.c           glvnd EGL vendor：让 Wayland 客户端用厂商 libmali
   mali-compat.c             补齐 libmali 与 deepin 用户态的接口差（treeland 预加载）
@@ -56,7 +58,7 @@ src/                      垫片源码（在目标机上编译）
   tl-norender.c             让 wlroots 不用假 render 节点、dmabuf 导出补 O_RDWR
   nm-station-fix.c          NetworkManager：把永不结束的 nl80211 station dump 改成单次查询
 rootfs/                   按原路径安装的文件（/etc、/usr/local）
-  etc/systemd/system/...    treeland / NetworkManager / wpa_supplicant / hciattach 的 drop-in，
+  etc/systemd/system/...    treeland / NetworkManager / wpa_supplicant / hciattach / ddm 的 drop-in，
                             hisi-ddm-watchdog、hisi-patch-check 的单元
   etc/glvnd/egl_vendor.d/   10_hisi_mali.json（让 glvnd 先问 libmali 垫片，再问 Mesa）
   etc/hisi-mali/egl-deny    GPU 黑名单（用户可编辑）
@@ -72,18 +74,42 @@ legacy/                   已被 glvnd 垫片取代的 LD_PRELOAD 客户端方�
 docs/                     GPU 方案细节、已知问题
 ```
 
-## 安装
+## 一键装机
 
-前提：deepin 25 的根文件系统已经放进 Rootb，并且已从 UOS 复制了内核模块（`/lib/modules/5.4.96-arm64-desktop`）和固件。怎么把根文件系统放进去不在本仓库范围内。
+同款机器（擎云 L540、出厂 UOS、内核 `5.4.96-arm64-desktop`）可以用 [install-deepin25.sh](install-deepin25.sh) 从零装好。ISO 自己准备（deepin 25 arm64 桌面版），UOS 需要已开启开发者模式（要用 sudo）。在 UOS 下以普通用户运行：
+
+```sh
+bash install-deepin25.sh --iso ~/deepin-25-arm64.iso                      # 装到出厂的 Rootb 分区
+bash install-deepin25.sh --iso ~/deepin-25-arm64.iso --target /dev/sdb1   # 或装到任意一个分区（U 盘、内置盘空闲分区）
+```
+
+- 一共 12 步，每步打印正在做什么和总进度；前两步只做检查，第 3 步列出要清空的分区（型号、容量、所在磁盘），输入大写 `YES` 才继续。
+- 目标分区会被 `mkfs.ext4` 清空；UOS 的根、Boot、EFI、/data、swap 和任何已挂载的分区都会被拒绝。
+- 垫片全部在新系统里现场编译，厂商 blob 从本机 UOS 复制，仓库不带任何二进制。sudo 密码只在终端输入一次，不落盘。
+- 启动项最后一步才写进 UOS Boot 分区的 `/grub/custom.cfg`（不跑 `update-grub`、不改默认项），之前任何一步失败 UOS 都没有改动。
+- 结束时打印回退方式；也存在 `/var/lib/deepin25-onekey/run-*/INSTALL_RESULT.txt`。
+- 装在 USB 设备上属于实验性（UOS initrd 带 usb-storage 时才允许），开机必须插着，deepin 不会设成“重启后继续进”。
+- 默认只装 deepin 25 和本仓库的补丁。天气壁纸是可选项、默认不装（也不会自动探测）：明确加 `--weather-wallpaper <WeatherWallpaper 源码目录>` 才会多一步现场编译它（多装几百 MB 的 Qt6/WebEngine，失败不影响系统）。
+
+## 安装（手工）
+
+前提：deepin 25 的根文件系统已经放进 Rootb，并且已从 UOS 复制了内核模块（`/lib/modules/5.4.96-arm64-desktop`）和固件。这部分可以用上一节的一键脚本完成，下面是它背后的手工步骤。
 
 ### 1. 引导（在 UOS 下操作）
 
 1. 把 `rootfs/usr/local/sbin/d25-init` 复制到 Rootb 的 `/usr/local/sbin/`（`chmod 755`）。它在 `exec systemd` 之前用 `printf 0` 关掉 elfverify，否则 systemd 第一次 spawn 子进程就会永久卡住。
-2. 参照 [examples/grub-custom.cfg](examples/grub-custom.cfg) 在 UOS Boot 分区的 `/grub/custom.cfg` 里加一个启动项，`init=/usr/local/sbin/d25-init`。
-3. `sudo grub-reboot deepin25-rootb` 后重启。默认启动项保持 UOS，断电或再重启就回 UOS。
-4. 最初几次试启动可以装上 [trial-boot/](trial-boot/) 里的兜底服务。
+2. **让 `/sbin/init` 指向 d25-init**（在 Rootb 的 chroot 里）：
+   ```sh
+   dpkg-divert --local --rename --divert /usr/sbin/init.systemd --add /usr/sbin/init
+   ln -s ../local/sbin/d25-init /usr/sbin/init     # 必须是相对链接
+   ```
+   原因：UOS initrd 的 `uos_config_init` 只有在新根的 `/boot/grub/grub.cfg` 含 `password_pbkdf2` 行时才认 `init=`，否则强制 `/sbin/init`。Rootb 一开始没有这个文件，`init=` 碰巧有效；deepin 控制中心会拉起 deepin-grub2，在 Rootb 生成一份 grub.cfg，从下次开机起 `init=` 就被忽略、elfverify 不关，systemd 卡在 “Listening on systemd-udevd-kernel.socket” 之后。
+3. 参照 [examples/grub-custom.cfg](examples/grub-custom.cfg) 在 UOS Boot 分区的 `/grub/custom.cfg` 里加一个启动项（`init=/usr/local/sbin/d25-init` 可以保留，有了第 2 步之后它不再是必需的）。
+4. `sudo grub-reboot deepin25-rootb` 后重启。默认启动项保持 UOS，断电或再重启就回 UOS。
+   装好 `hisi-next-boot.timer`（`systemctl enable hisi-next-boot.timer`）后，deepin 每次开机 2 分钟、ddm 仍在运行时，会把 UOS Boot 分区 grubenv 的 `next_entry` 设回 `deepin25-rootb`：平时重启一直进 deepin，某次开机卡死、长按重启就回 UOS。在 deepin 里 `sudo hisi-next-boot uos` 让下次进 UOS；`/etc/hisi-next-boot.off` 存在时不自动设置。
+5. 最初几次试启动可以装上 [trial-boot/](trial-boot/) 里的兜底服务。
 
-不要在 deepin 里运行 `update-grub`：它会改写 UOS Boot 分区上的 `grub.cfg`。
+deepin 里的 `update-grub`（包括控制中心的启动菜单设置）只会写 Rootb 自己的 `/boot/grub/grub.cfg`，开机并不读它（真正生效的是 UOS Boot 分区那份），但它会触发上面第 2 步说的 initrd 行为。Rootb 的 fstab 不要挂载 UOS Boot 分区到 `/boot`，否则 `update-grub` 会改写 UOS 的 `grub.cfg`。
 
 ### 2. 编译和安装（在 deepin 25 下操作）
 
