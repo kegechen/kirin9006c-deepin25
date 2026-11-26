@@ -7,12 +7,13 @@
 /usr/sbin/init
 /usr/local/bin/hciattach-hisi
 noauto:/usr/local/bin/box64
-# 天气壁纸 treeland 扩展（WeatherWallpaper 仓库 linux/install.sh 安装；没装时 snapshot 会跳过这几条）
-# metadata.json 已 dpkg-divert 到 metadata.json.deepin，这里是“原列表 + wwp 壁纸包”的合并结果
-/usr/local/bin/treeland-wallpaper-factory
-/usr/local/bin/wwp-set
-/usr/local/share/wallpapers/wwp/*/*
-/usr/share/wallpapers/deepin-livewallpapers/metadata.json
+# 天气壁纸 treeland 扩展（WeatherWallpaper 仓库 deepin-v25/ 的 install.sh 安装时才跟踪；没装时 snapshot 会跳过这几条）。
+# 用 deb（wwp-weather-wallpaper）装的归 dpkg 管：unowned: 让它们不进基线，否则每次装卸 deb 都报警、--fix 还会把卸掉的文件恢复回来。
+# 动态壁纸列表 metadata.json 不跟踪：它由安装脚本 / deb 的 postinst 生成（原列表 dpkg-divert 到 metadata.json.deepin），
+# 卸载时要还原；dpkg -S 永远认为它属于 deepin-wallpapers。
+unowned:/usr/local/bin/treeland-wallpaper-factory
+unowned:/usr/local/bin/wwp-set
+unowned:/usr/local/share/wallpapers/wwp/*/*
 /usr/local/lib/hisi-mali/*
 /usr/local/lib/hisi-nmfix/*
 /usr/local/lib/hisi-treeland/*

@@ -10,7 +10,7 @@
 #   --target /dev/<分区>    任意一个分区：U 盘、移动硬盘，或内置盘上空出来的分区。必须是分区（lsblk 里 TYPE=part），
 #                           不能是整盘；UOS 正在用的（根、/boot、EFI、/data、swap）和已挂载的分区一律拒绝。
 #                           分区在 USB 设备上时开机必须插着，而且 deepin 不会被设成“重启后继续进”。
-#   --weather-wallpaper <目录>  可选，默认不装：WeatherWallpaper 源码目录（含 linux/ 和 web/）。给了才会
+#   --weather-wallpaper <目录>  可选，默认不装：WeatherWallpaper 源码目录（含 deepin-v25/ 和 web/）。给了才会
 #                           多一步，在新系统里现场编译天气壁纸（多装几百 MB 的 Qt6/WebEngine）；失败不影响系统。
 #   --mirror <URL>          deepin 25 软件源（默认官方社区源）
 #
@@ -104,7 +104,7 @@ done
 # 天气壁纸只在明确给了 --weather-wallpaper 时才装，不自动探测
 if [ -n "$WWP_SRC" ]; then
   WWP_SRC=$(readlink -f "$WWP_SRC")
-  [ -f "$WWP_SRC/linux/install.sh" ] && [ -d "$WWP_SRC/web" ] || die "$WWP_SRC 里要有 linux/install.sh 和 web/"
+  [ -f "$WWP_SRC/deepin-v25/install.sh" ] && [ -d "$WWP_SRC/web" ] || die "$WWP_SRC 里要有 deepin-v25/install.sh 和 web/"
   WWP_WANT=1
   TOTAL=$((TOTAL+1))
 fi
@@ -737,7 +737,7 @@ if [ "$WWP_WANT" = 1 ]; then
   if [ -z "$WWP_SRC" ]; then
     progress "跳过：第 7 步没装上天气壁纸的依赖（$T/apt-wwp.log）"
   elif ! { S install -d "$M/opt/WeatherWallpaper" \
-           && tar -C "$WWP_SRC" --exclude=linux/build --exclude=linux/third_party -cf - linux web \
+           && tar -C "$WWP_SRC" --exclude=deepin-v25/build --exclude=deepin-v25/third_party -cf - deepin-v25 web \
               | S tar -C "$M/opt/WeatherWallpaper" -xf - --no-same-owner; }; then
     warn "复制天气壁纸源码失败，跳过"
   else
@@ -746,12 +746,12 @@ if [ "$WWP_WANT" = 1 ]; then
     # chroot 里建不了 user namespace（Chromium 沙箱起不来），/dev/shm 也不是 tmpfs：离线渲染时关沙箱、共享内存改走 /tmp
     if long "$T/wwp-build.log" C runuser -u "$USER_NAME" -- env HOME="/home/$USER_NAME" QT_QPA_PLATFORM=offscreen \
          QTWEBENGINE_DISABLE_SANDBOX=1 QTWEBENGINE_CHROMIUM_FLAGS='--no-sandbox --disable-dev-shm-usage' \
-         timeout 1800 sh /opt/WeatherWallpaper/linux/install.sh build \
-       && C sh /opt/WeatherWallpaper/linux/install.sh install > "$T/wwp-install.log" 2>&1; then
+         timeout 1800 sh /opt/WeatherWallpaper/deepin-v25/install.sh build \
+       && C sh /opt/WeatherWallpaper/deepin-v25/install.sh install > "$T/wwp-install.log" 2>&1; then
       progress "天气壁纸已安装（进 deepin 后在控制中心 → 壁纸 → 动态壁纸里选）"
       WWP_DONE=1
     else
-      warn "天气壁纸没装成（不影响系统）。进 deepin 后可手动：cd /opt/WeatherWallpaper/linux && ./install.sh build && sudo ./install.sh install（日志 $T/wwp-*.log）"
+      warn "天气壁纸没装成（不影响系统）。进 deepin 后可手动：cd /opt/WeatherWallpaper/deepin-v25 && ./install.sh build && sudo ./install.sh install（日志 $T/wwp-*.log）"
     fi
   fi
 fi
@@ -848,6 +848,6 @@ cat <<EOF
      不想要：在 deepin 里 sudo systemctl disable d25-bootguard。
 EOF
 if [ "$WWP_DONE" = 1 ]; then
-  printf '  7. 卸载天气壁纸：在 deepin 里 cd /opt/WeatherWallpaper/linux && sudo ./install.sh uninstall\n'
+  printf '  7. 卸载天气壁纸：在 deepin 里 cd /opt/WeatherWallpaper/deepin-v25 && sudo ./install.sh uninstall\n'
 fi
 printf '\n[%s] 【总进度 100%%】装机完成，重启即可进入 deepin 25。上面的内容也保存在 %s/INSTALL_RESULT.txt\n' "$(ts)" "$T"
