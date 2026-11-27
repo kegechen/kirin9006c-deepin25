@@ -27,6 +27,7 @@
 | 启动 | 正常；grub 默认仍是 UOS，deepin 每次正常开机后自动把下次开机设回 deepin，开机卡死则自动回 UOS | `d25-init`、`hisi-next-boot`、`examples/grub-custom.cfg` |
 | Wi‑Fi | 正常 | UOS 的 `wpa_supplicant-hisi`、`libnm-station-fix.so` |
 | 蓝牙 | 正常 | UOS 的 `hciattach-hisi` |
+| 声音 | 内置喇叭正常、无杂音；音量键正常 | `91-pipewire-huawei.rules`、`90-hisi-da-combine.conf`，见 [docs/known-issues.md](docs/known-issues.md) |
 | 合成器 GPU | treeland 走 Mali-G78，CPU 从约 500%（llvmpipe）降到 3–6% | `libmali-compat.so`、`libtl-norender.so`、treeland drop-in |
 | 客户端 GPU | 任务栏、控制中心、壁纸进程、mpv 等 Wayland 客户端不设环境变量即走 libmali | `libtl-malibuf.so`、`libEGL_hisi_mali.so.0` |
 | 动态壁纸 | 锁屏循环播放，桌面定格（treeland 0.11 的设计）；重编码为 1440p 后解码开销降一半以上 | `hisi-wallpaper-reencode` |
@@ -63,6 +64,8 @@ rootfs/                   按原路径安装的文件（/etc、/usr/local）
   etc/glvnd/egl_vendor.d/   10_hisi_mali.json（让 glvnd 先问 libmali 垫片，再问 Mesa）
   etc/hisi-mali/egl-deny    GPU 黑名单（用户可编辑）
   etc/NetworkManager/       关闭扫描随机 MAC、关闭 Wi‑Fi 省电
+  etc/udev/rules.d/         91-pipewire-huawei.rules（让 PipeWire 用华为声卡配置集）
+  etc/wireplumber/          90-hisi-da-combine.conf（内置声卡固定 960 帧 DMA 周期，去杂音）
   etc/apt/apt.conf.d/       hisi-patch-check 的 apt 钩子
   usr/local/sbin/           d25-init、hisi-ddm-watchdog、hisi-wallpaper-reencode、hisi-patch-check
   usr/local/lib/hisi-patch/ 补丁自检的跟踪清单、敏感包清单和说明

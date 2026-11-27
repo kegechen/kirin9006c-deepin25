@@ -1,0 +1,4 @@
+# PipeWire 只认 ACP_PROFILE_SET，不认 PulseAudio 的 PULSE_PROFILE_SET（见 UOS 带来的 90-pulseaudio-huawei.rules）。
+# 只给内置声卡（da_combine_v5）套华为配置集，DP 声卡保持默认。
+# 配置集和 path 文件由 install-deepin25.sh 从 UOS 复制到 /usr/share/alsa-card-profile/mixer/。
+SUBSYSTEM=="sound", ACTION=="change", KERNEL=="card*", ENV{PULSE_PROFILE_SET}=="pulse-huawei.conf", ENV{ACP_PROFILE_SET}="pulse-huawei.conf"

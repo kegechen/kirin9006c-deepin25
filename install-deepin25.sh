@@ -517,6 +517,32 @@ Section "Screen"
     DefaultDepth 24
 EndSection
 EOF
+# 音频：上面只拷了 hw-audio 包的文件，没执行它的 postinst。按 UOS 上 postinst 的结果补齐，否则内置喇叭没声音：
+#  1) hwaudioservice 的文件能力 cap_dac_override：没有它就读不了 DMI 表（判机型），也不会给两颗 TFA9874 功放上电。
+#     tar 不带文件能力，要重新设。
+#  2) postinst 按机型建的两个符号链接（pulse-huawei.conf、audio_vqe_voice.bin），照抄 UOS 的。
+#  3) deepin 用 PipeWire：华为的配置集和 path 要放进 ACP 的目录，rootfs 里的 91-pipewire-huawei.rules 让声卡选中它；
+#     DMA 周期的修正在 rootfs 的 wireplumber.conf.d/90-hisi-da-combine.conf。
+for f in usr/bin/hwaudioservice usr/share/hw-audio/hwaudioservice; do
+  S test -f "$M/$f" || continue
+  S setcap cap_dac_override=eip "$M/$f" || warn "给 /$f 设文件能力失败，内置喇叭会没声音"
+done
+for f in usr/share/pulseaudio/alsa-mixer/profile-sets/pulse-huawei.conf usr/share/hw-audio/audio_vqe_voice.bin; do
+  if [ -L "/$f" ] && ! S test -e "$M/$f" && ! S test -L "$M/$f"; then
+    S cp -a "/$f" "$M/$f" || warn "复制 /$f 失败"
+  fi
+done
+PA=/usr/share/pulseaudio/alsa-mixer
+ACP=$M/usr/share/alsa-card-profile/mixer
+if [ ! -e "$PA/profile-sets/pulse-huawei.conf" ]; then
+  warn "UOS 上没有 $PA/profile-sets/pulse-huawei.conf，PipeWire 用不上华为声卡配置"
+elif S install -D -m 644 "$PA/profile-sets/pulse-huawei.conf" "$ACP/profile-sets/pulse-huawei.conf" \
+     && S sh -c 'install -d "$2/paths" && for p in "$1"/paths/*-huawei*.conf; do install -m 644 "$p" "$2/paths/" || exit 1; done' \
+          sh "$PA" "$ACP"; then
+  progress "华为声卡配置已放进 PipeWire（ACP）目录，hwaudioservice 已设 cap_dac_override"
+else
+  warn "复制华为声卡配置到 $ACP 失败，内置喇叭可能用不上华为配置"
+fi
 progress "厂商组件复制完成"
 
 # ==== 6 ====
@@ -773,6 +799,14 @@ done
 S grep -q "^UUID=${NEW_UUID}[[:space:]]\+/[[:space:]]" "$M/etc/fstab" || fail="$fail fstab"
 S awk -F: -v u="$USER_NAME" '$1==u && substr($2,1,1)=="$" {f=1} END{exit !f}' "$M/etc/shadow" || fail="$fail 用户密码"
 S awk -F: -v u="$USER_NAME" '$1=="sudo" && ("," $4 ",") ~ ("," u ",") {f=1} END{exit !f}' "$M/etc/group" || fail="$fail sudo组"
+# 声音不影响开机，只警告
+if S test -f "$M/usr/bin/hwaudioservice" && ! S getcap "$M/usr/bin/hwaudioservice" 2>/dev/null | grep -q cap_dac_override; then
+  warn "hwaudioservice 没有 cap_dac_override，内置喇叭会没声音（见 docs/known-issues.md 的“声音”一节）"
+fi
+for f in etc/udev/rules.d/91-pipewire-huawei.rules etc/wireplumber/wireplumber.conf.d/90-hisi-da-combine.conf \
+         usr/share/alsa-card-profile/mixer/profile-sets/pulse-huawei.conf; do
+  S test -e "$M/$f" || warn "缺 /$f，内置喇叭可能没声音或有杂音"
+done
 # 还原 ISO 原来的 resolv.conf 和 policy-rc.d
 S rm -f "$M/usr/sbin/policy-rc.d" "$M/etc/resolv.conf"
 if S test -e "$T/resolv.conf.iso" || S test -L "$T/resolv.conf.iso"; then S cp -a "$T/resolv.conf.iso" "$M/etc/resolv.conf"; fi

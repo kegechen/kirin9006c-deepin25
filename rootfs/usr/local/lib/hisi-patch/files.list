@@ -38,6 +38,11 @@ unowned:/usr/local/share/wallpapers/wwp/*/*
 /etc/systemd/resolved.conf.d/l540-fallback-dns.conf
 /etc/glvnd/egl_vendor.d/10_hisi_mali.json
 /etc/X11/default-display-manager
+# 声音：PipeWire 选华为配置集、固定 DMA 周期；配置集和 path 是装机时从 UOS 复制进 ACP 目录的
+/etc/udev/rules.d/91-pipewire-huawei.rules
+/etc/wireplumber/wireplumber.conf.d/90-hisi-da-combine.conf
+unowned:/usr/share/alsa-card-profile/mixer/profile-sets/pulse-huawei.conf
+unowned:/usr/share/alsa-card-profile/mixer/paths/*-huawei*.conf
 /usr/bin/fingerprint_daemon
 unowned:/usr/lib/*.so*
 noauto:/usr/lib/box64-x86_64-linux-gnu/*

@@ -45,6 +45,33 @@ systemctl --user start dde-shell@DDE.service
 - 能识别后，sudo 和 polkit 可以用指纹；**锁屏和登录界面不行**：ddm + treeland 的 greeter 不接 `Authenticate1`，只能输密码。
 - UOS 和 deepin 共用 TEE 里的指纹存储，在一边重新录入会影响另一边，动手前先备份。
 
+## 声音
+
+内核驱动和固件都是 UOS 的，本来就正常；没声音和杂音都出在用户态。一键装机已处理下面三件事，手工装的照着补。
+
+1. **没声音**：UOS 的 `hw-audio` 包在 postinst 里给 `hwaudioservice` 设了 `cap_dac_override`，只拷文件会丢掉。没有这个能力，它读不了 DMI 表判断机型，两颗 TFA9874 功放（I2C 总线 3 的 0x34/0x36，`STATUS` 寄存器 0x0001 = 没上电）就一直不工作。补上之后，登录时由 `/etc/xdg/autostart/hwaudioservice.desktop` 自动拉起，不需要 root、也不用放宽 DMI 表权限：
+   ```sh
+   sudo setcap cap_dac_override=eip /usr/bin/hwaudioservice
+   sudo setcap cap_dac_override=eip /usr/share/hw-audio/hwaudioservice
+   ```
+   日志（`/tmp/hwaudioservice-*.log`）里的 `smartpakit ... not support cmd = 0x835c4d01` 在 UOS 上也有，不影响功放上电。
+2. **PipeWire 用不上华为配置集**：UOS 的 `90-pulseaudio-huawei.rules` 只设 PulseAudio 认的 `PULSE_PROFILE_SET`，PipeWire 只认 `ACP_PROFILE_SET`，于是退回 `stereo-fallback`。`91-pipewire-huawei.rules` 补上这个变量；配置集和 path 要放进 ACP 的目录：
+   ```sh
+   A=/usr/share/alsa-card-profile/mixer
+   sudo install -m 644 /media/uos/Roota/usr/share/pulseaudio/alsa-mixer/profile-sets/pulse-huawei.conf $A/profile-sets/
+   sudo install -m 644 /usr/share/pulseaudio/alsa-mixer/paths/*-huawei*.conf $A/paths/
+   ```
+   UOS 上的 `pulse-huawei.conf` 是 postinst 按机型建的符号链接（L540 指向 `pulse-huawei-6-channels.conf`）。
+3. **杂音、播放变快**：`da_combine_v5` 驱动的 DMA 周期写死为 960 帧（20ms），却按 ALSA 协商的周期推进 `hw_ptr`。用 `aplay -D hw:0,0 --period-size=N` 放一个 10 秒的文件：960 帧用时 10.01 秒，1024 帧 9.39 秒，1920 帧 5.01 秒。PipeWire 默认用 1024，于是断流、噼啪、快 6.7%。`90-hisi-da-combine.conf` 把周期固定为 960 帧、2 个周期，并改为按中断调度（`api.alsa.disable-tsched`）。
+   - 只看 `pw-top` 的 ERR 列会误判：1920 帧时 ERR 也是 0，但实际是双倍速。要看 `/proc/asound/card0/pcm0p/sub0/status` 里 `hw_ptr` 每秒涨多少（应约 48000），或者量一个文件实际放了多久。
+
+手工改完不用重启：`sudo udevadm control --reload; sudo udevadm trigger --action=change --subsystem-match=sound`，再 `systemctl --user restart wireplumber`，默认输出选 DA_combine 的模拟立体声。
+
+## 功能键
+
+- **Fn 是切换键，不是按住用的**：按一下 Fn 在“F1–F12”和“热键”两种模式间切换（键盘发 HID 用法 0x700ae / 0x700af，内核映射成 `KEY_UNKNOWN`）。热键模式下 F4/F5/F6 直接发 `KEY_MUTE` / `KEY_VOLUMEDOWN` / `KEY_VOLUMEUP`，音量调节正常；按住 Fn 再按 F4 得到的是普通 F4。
+- **亮度键无效**：键能收到，但 treeland 下 `dde-shortcut-tool` 只通过合成器的 gamma 调亮度，而 hisi-drm 的 eDP-1 不支持 gamma LUT（treeland 日志 `does not support gamma LUT`），请求被拒，背光 `/sys/class/backlight/mipi2edp-backlight` 没人去写。暂不处理。
+
 ## 网络
 
 - deepin 自带的 wpa_supplicant 2.10 会建 `p2p-dev-wlan0`，Hi1103 驱动处理不了，卡死后占住 rtnl，所有网络相关进程跟着卡。所以换成 UOS 带 `+hisi` 补丁的 2.9。
