@@ -126,6 +126,27 @@ chmod 755 "$STAGE/DEBIAN/postinst"
 
 write_postinst
 
+write_preinst() {
+cat > "$STAGE/DEBIAN/preinst" <<'EOS'
+#!/bin/sh
+# /usr/share/deepin-authentication/{allowlist,app-type-list} 属于 deepin-authenticate 包，
+# 我们要改它（把 ddm/treeland 加进生物认证调用方白名单），必须先 dpkg-divert 接管路径，
+# 否则 dpkg 拒绝覆盖别人的文件。deepin-authenticate 以后升级会把新版本写到 diverted 名下。
+set -e
+DIVERTED=/usr/share/deepin-authentication
+for f in allowlist app-type-list; do
+    if ! dpkg-divert --list "$DIVERTED/$f" 2>/dev/null | grep -q .; then
+        dpkg-divert --package kirin9006c-deepin25 --add --rename \
+            --divert "$DIVERTED/$f.hisi-orig" "$DIVERTED/$f"
+    fi
+done
+exit 0
+EOS
+chmod 755 "$STAGE/DEBIAN/preinst"
+}
+
+write_preinst
+
 cat > "$STAGE/DEBIAN/prerm" <<'EOS'
 #!/bin/sh
 # 卸载时停服务（升级走 upgrade 分支，不打断正在运行的解锁服务）
@@ -144,6 +165,12 @@ set -e
 if [ "$1" = remove ] || [ "$1" = purge ]; then
     # 还原控制中心“生物认证”入口补丁（幂等）
     [ -x /usr/local/sbin/hisi-dcc-bio-entry ] && /usr/local/sbin/hisi-dcc-bio-entry --undo || true
+    # 归还 preinst 里 dpkg-divert 接管的 deepin-authentication 白名单文件：
+    # 此时本包的文件已被 dpkg 删除，--rename 把 .hisi-orig（上游版）改回原路径
+    for f in /usr/share/deepin-authentication/allowlist /usr/share/deepin-authentication/app-type-list; do
+        dpkg-divert --package kirin9006c-deepin25 --remove --rename \
+            --divert "$f.hisi-orig" "$f" >/dev/null 2>&1 || true
+    done
 fi
 if [ "$1" = purge ]; then
     # 配对数据（手机公钥等）与补丁基线：用户明确 purge 才删
