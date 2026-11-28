@@ -29,6 +29,10 @@ Item {
     readonly property bool bioActive: GreeterProxy.isLocked && !enteringOtherUser
                                       && BioUnlock.user.length > 0
                                       && BioUnlock.user === UserModel.currentUserName
+    // 手机：只在锁屏、且是当前这个用户配对的手机连着电脑时显示
+    readonly property bool phoneActive: GreeterProxy.isLocked && !enteringOtherUser
+                                        && BioUnlock.phoneUser.length > 0
+                                        && BioUnlock.phoneUser === UserModel.currentUserName
     readonly property int fpState: bioActive ? BioUnlock.fingerprint : 0
     readonly property int faceState: bioActive ? BioUnlock.face : 0
     readonly property string bioHint: {
@@ -422,6 +426,44 @@ Item {
             dimmed: loginGroup.faceState === 4
             clickable: loginGroup.faceState === 1 || loginGroup.faceState === 3
             onClicked: BioUnlock.startFace()
+        }
+    }
+
+    /* 手机已连上电脑：图标 + 名字。只是提示，真正解锁要在手机上验证（指纹 / 一键）。
+     * 名字是手机自己报的，按纯文本显示（不解析 HTML），过长截断 */
+    Column {
+        id: phoneRow
+        spacing: 8
+        visible: loginGroup.phoneActive
+        anchors {
+            horizontalCenter: parent.horizontalCenter
+            top: bioRow.visible ? bioRow.bottom : hintText.bottom
+            topMargin: bioRow.visible ? 18 : 20
+        }
+
+        BioButton {
+            anchors.horizontalCenter: parent.horizontalCenter
+            // 手机轮廓（参照 Lucide 图标 smartphone，ISC 许可）
+            glyph: "M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z M12 18h.01"
+            passed: true   // 只借它的绿色表示“已连接”
+        }
+
+        Text {
+            width: 320
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+            textFormat: Text.PlainText
+            text: "手机“" + BioUnlock.phoneName + "”已连接"
+            font: D.DTK.fontManager.t8
+            color: Qt.rgba(1.0, 1.0, 1.0, 0.85)
+        }
+
+        Text {
+            width: 320
+            horizontalAlignment: Text.AlignHCenter
+            text: "在手机上验证即可解锁"
+            font: D.DTK.fontManager.t8
+            color: Qt.rgba(1.0, 1.0, 1.0, 0.6)
         }
     }
 

@@ -69,6 +69,9 @@ class BioUnlock : public QObject
     Q_PROPERTY(QString user READ user NOTIFY changed)
     Q_PROPERTY(int fingerprint READ fingerprint NOTIFY changed)
     Q_PROPERTY(int face READ face NOTIFY changed)
+    // 已连上电脑的手机（名字由 hisi-bio-unlock 经 GetPhone 给，信号里不带）；phoneUser 是它属于哪个用户
+    Q_PROPERTY(QString phoneUser READ phoneUser NOTIFY phoneChanged)
+    Q_PROPERTY(QString phoneName READ phoneName NOTIFY phoneChanged)
 
 public:
     explicit BioUnlock(QObject *parent = nullptr)
@@ -77,20 +80,27 @@ public:
         QDBusConnection bus = QDBusConnection::systemBus();
         bus.connect(BIO_SVC, BIO_PATH, BIO_IFACE, "StateChanged", this,
                     SLOT(onSignal(QString, int, int)));
+        bus.connect(BIO_SVC, BIO_PATH, BIO_IFACE, "PhoneChanged", this, SLOT(onPhoneSignal()));
         auto *watcher = new QDBusServiceWatcher(BIO_SVC, bus, QDBusServiceWatcher::WatchForOwnerChange, this);
         connect(watcher, &QDBusServiceWatcher::serviceOwnerChanged, this,
                 [this](const QString &, const QString &, const QString &owner) {
-                    if (owner.isEmpty())
+                    if (owner.isEmpty()) {
                         apply(QString(), 0, 0);   // hisi-bio-unlock 退出了
-                    else
+                        applyPhone(QString(), QString());
+                    } else {
                         refresh();
+                        refreshPhone();
+                    }
                 });
         refresh();
+        refreshPhone();
     }
 
     QString user() const { return m_user; }
     int fingerprint() const { return m_fp; }
     int face() const { return m_face; }
+    QString phoneUser() const { return m_phoneUser; }
+    QString phoneName() const { return m_phoneName; }
 
     Q_INVOKABLE void startFace()
     {
@@ -100,6 +110,7 @@ public:
 
 Q_SIGNALS:
     void changed();
+    void phoneChanged();
 
 private Q_SLOTS:
     void onSignal(const QString &user, int fp, int face)
@@ -108,7 +119,36 @@ private Q_SLOTS:
         apply(user, fp, face);
     }
 
+    void onPhoneSignal()
+    {
+        refreshPhone();
+    }
+
 private:
+    void applyPhone(const QString &user, const QString &name)
+    {
+        if (user == m_phoneUser && name == m_phoneName)
+            return;
+        m_phoneUser = user;
+        m_phoneName = name;
+        Q_EMIT phoneChanged();
+    }
+
+    /* 信号只说“变了”：每次都重取，以最后一次回复为准（回复按发出顺序到达） */
+    void refreshPhone()
+    {
+        auto *w = new QDBusPendingCallWatcher(
+            QDBusConnection::systemBus().asyncCall(
+                QDBusMessage::createMethodCall(BIO_SVC, BIO_PATH, BIO_IFACE, "GetPhone")),
+            this);
+        connect(w, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
+            QDBusPendingReply<QString, QString> r = *w;
+            if (r.isValid())
+                applyPhone(r.argumentAt<0>(), r.argumentAt<1>());
+            w->deleteLater();
+        });
+    }
+
     void apply(const QString &user, int fp, int face)
     {
         if (user == m_user && fp == m_fp && face == m_face)
@@ -135,6 +175,8 @@ private:
         });
     }
 
+    QString m_phoneUser;
+    QString m_phoneName;
     QString m_user;
     int m_fp = 0;
     int m_face = 0;
