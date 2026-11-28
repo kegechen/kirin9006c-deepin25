@@ -39,6 +39,7 @@ public class MainActivity extends Activity {
     private static final int M_PASTE = 2;
     private static final int M_DELETE = 3;
     private static final int M_EXTRA = 4;
+    private static final int M_ABOUT = 5;
 
     private LinearLayout list;
 
@@ -176,6 +177,7 @@ public class MainActivity extends Activity {
         menu.add(0, M_PASTE, 1, "粘贴配对链接");
         menu.add(0, M_DELETE, 2, "删除这台电脑");
         menu.add(0, M_EXTRA, 3, "编辑额外地址");
+        menu.add(0, M_ABOUT, 4, "关于");
         return true;
     }
 
@@ -204,9 +206,29 @@ public class MainActivity extends Activity {
                     }
                 });
                 return true;
+            case M_ABOUT:
+                about();
+                return true;
             default:
                 return super.onOptionsItemSelected(item);
         }
+    }
+
+    /** 关于：显示应用版本（AndroidManifest 的 versionName）。 */
+    private void about() {
+        String v;
+        try {
+            v = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (PackageManager.NameNotFoundException e) {
+            v = "未知";
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("关于")
+                .setMessage("电脑解锁\n版本 " + v + "\n\n"
+                        + "在手机上验证后解锁电脑：同一局域网走 Wi-Fi（也支持蓝牙），"
+                        + "装了 Tailscale 时可以在外面远程解锁（电脑地址填 100.x）。")
+                .setPositiveButton("好", null)
+                .show();
     }
 
     private interface PcCallback {

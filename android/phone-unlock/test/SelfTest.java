@@ -146,7 +146,7 @@ public final class SelfTest {
         check(vf.verify(sig), "SHA256withECDSA 对 U 签名可验（DER " + sig.length + " 字节，公钥 SPKI " + kp.getPublic().getEncoded().length + " 字节）");
     }
 
-    static void parsing() {
+    static void parsing() throws Exception {
         System.out.println("== 解析 ==");
         PairUri pu = PairUri.parse("hisiphone://pair?v=1&id=0123456789abcdef0123456789abcdef&c=AAAAAAAAAAAAAAAAAAAAAA"
                 + "&h=my%20pc&u=%E5%BC%A0%E4%B8%89&ip=192.0.2.1,198.51.100.7&p=47390&bt=aa:bb:cc:dd:ee:ff");
@@ -168,6 +168,25 @@ public final class SelfTest {
         List<HostPort> l = HostPort.parseList("127.0.0.1, 192.168.1.10:5000，[::1]:7 pc.local", 47390);
         check(l.size() == 4 && l.get(0).port == 47390 && l.get(1).port == 5000 && l.get(2).host.equals("::1")
                 && l.get(2).port == 7 && l.get(3).host.equals("pc.local"), "额外地址解析：" + l);
+        lanAddress();
+    }
+
+    /** 哪些目标要绑到 Wi-Fi：只有局域网地址；回环、Tailscale、公网都不绑 */
+    static void lanAddress() throws Exception {
+        String[] lan = {"192.168.137.27", "10.1.2.3", "172.16.0.9", "172.31.255.1", "169.254.1.1", "fe80::1", "fd12:3456::1"};
+        String[] notLan = {"127.0.0.1", "::1", "100.64.0.1", "100.101.102.103", "100.127.255.254", "fd7a:115c:a1e0::1",
+                "fd7a:115c:a1e0:ab12::2", "8.8.8.8", "1.1.1.1", "203.0.113.5", "2001:db8::1", "224.0.0.1"};
+        for (String s : lan) {
+            check(org.hisi.phoneunlock.proto.LanAddress.isLan(java.net.InetAddress.getByName(s)), "局域网地址要绑 Wi-Fi：" + s);
+        }
+        for (String s : notLan) {
+            check(!org.hisi.phoneunlock.proto.LanAddress.isLan(java.net.InetAddress.getByName(s)), "不绑 Wi-Fi：" + s);
+        }
+        check(org.hisi.phoneunlock.proto.LanAddress.isTailscale(java.net.InetAddress.getByName("100.100.100.100"))
+                && org.hisi.phoneunlock.proto.LanAddress.isTailscale(java.net.InetAddress.getByName("fd7a:115c:a1e0::5"))
+                && !org.hisi.phoneunlock.proto.LanAddress.isTailscale(java.net.InetAddress.getByName("192.168.1.1"))
+                && !org.hisi.phoneunlock.proto.LanAddress.isTailscale(java.net.InetAddress.getByName("fd7a:115c:a1e1::5")),
+                "isTailscale 边界");
     }
 
     static boolean throwsIae(String s) {

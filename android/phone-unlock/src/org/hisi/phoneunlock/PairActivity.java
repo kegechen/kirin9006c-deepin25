@@ -98,7 +98,10 @@ public class PairActivity extends WorkActivity {
         return sb.toString();
     }
 
-    private void confirm() {
+    private void confirm() { confirm(null, null); }
+
+    /** presetName / presetExtra：测试连接后重建对话框时把用户填过的东西带回来，别悄悄恢复默认值。 */
+    private void confirm(String presetName, String presetExtra) {
         final PcRecord old = Store.get(this, pu.pcId);
         LinearLayout box = Ui.vbox(this);
         int p = Ui.dp(this, 22);
@@ -106,12 +109,19 @@ public class PairActivity extends WorkActivity {
         String msg = "电脑：" + (pu.host.isEmpty() ? "（未知）" : pu.host) + "\n用户：" + (pu.user.isEmpty() ? "（未知）" : pu.user);
         if (old != null) msg += "\n\n这台电脑之前配对过，重新配对会替换原来的配对。";
         box.addView(Ui.text(this, msg, 16, Ui.TEXT, false));
+        box.addView(Ui.text(this, "手机名称（锁屏和电脑上显示）", 13, Ui.TEXT2, false), Ui.lpTop(this, -1, -2, 16));
+        final EditText name = new EditText(this);
+        name.setSingleLine(true);
+        name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        name.setHint(defaultName(false));
+        box.addView(name, Ui.lp(-1, -2));
+        name.setText(presetName != null ? presetName : defaultName(false));
         box.addView(Ui.text(this, "额外地址（可不填，逗号分隔的 host[:port]）", 13, Ui.TEXT2, false), Ui.lpTop(this, -1, -2, 16));
         final EditText extra = new EditText(this);
         extra.setSingleLine(true);
         extra.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         extra.setHint("例如 127.0.0.1");
-        if (old != null) extra.setText(old.extra);
+        extra.setText(presetExtra != null ? presetExtra : (old != null ? old.extra : ""));
         box.addView(extra, Ui.lp(-1, -2));
 
         new AlertDialog.Builder(this)
@@ -122,6 +132,11 @@ public class PairActivity extends WorkActivity {
                     @Override
                     public void onClick(DialogInterface d, int w) {
                         final String ex = extra.getText().toString().trim();
+                        final String nm = name.getText().toString().trim();
+                        if (nm.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 64) {
+                            showDone(false, "手机名称太长（最多 64 字节）");
+                            return;
+                        }
                         try {
                             HostPort.parseList(ex, pu.port);
                         } catch (IllegalArgumentException e) {
@@ -130,23 +145,24 @@ public class PairActivity extends WorkActivity {
                         }
                         String why = KeyHelper.notReadyReason(PairActivity.this);
                         if (why != null) {
-                            notReady(why, ex);
+                            notReady(why, ex, nm);
                             return;
                         }
-                        start(ex, false);
+                        start(ex, nm, false);
                     }
                 })
                 .setNeutralButton("测试连接", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int w) {
                         final String ex = extra.getText().toString().trim();
+                        final String nm = name.getText().toString().trim();
                         try {
                             HostPort.parseList(ex, pu.port);
                         } catch (IllegalArgumentException e) {
                             showDone(false, "额外地址格式不对：" + e.getMessage());
                             return;
                         }
-                        probe(ex);
+                        probe(ex, nm);
                     }
                 })
                 .setNegativeButton("取消", new DialogInterface.OnClickListener() {
@@ -160,7 +176,7 @@ public class PairActivity extends WorkActivity {
     }
 
     /** 只连接 + PING（核对电脑 ID），Wi-Fi 和蓝牙各试一次；不生成密钥、不用配对码。测完回到确认框。 */
-    private void probe(final String extra) {
+    private void probe(final String extra, final String presetName) {
         progress.setVisibility(View.VISIBLE);
         action.setVisibility(View.GONE);
         statusView.setTextColor(Ui.TEXT);
@@ -196,7 +212,7 @@ public class PairActivity extends WorkActivity {
                         progress.setVisibility(View.GONE);
                         statusView.setTextColor(ok ? Ui.OK_GREEN : Ui.ERR_RED);
                         statusView.setText(sb.toString().trim());
-                        if (!isFinishing()) confirm();
+                        if (!isFinishing()) confirm(presetName, extra);
                     }
                 });
             }
@@ -204,7 +220,7 @@ public class PairActivity extends WorkActivity {
     }
 
     /** 不能用指纹：去设置，或者先用测试用的一键解锁模式配对。 */
-    private void notReady(String why, final String extra) {
+    private void notReady(String why, final String extra, final String name) {
         showDone(false, why);
         new AlertDialog.Builder(this)
                 .setTitle("现在还不能用指纹")
@@ -213,7 +229,7 @@ public class PairActivity extends WorkActivity {
                 .setNeutralButton("一键模式（测试）", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int w) {
-                        start(extra, true);
+                        start(extra, name, true);
                     }
                 })
                 .setPositiveButton("去设置", new DialogInterface.OnClickListener() {
@@ -230,7 +246,7 @@ public class PairActivity extends WorkActivity {
                 .show();
     }
 
-    private void start(final String extra, final boolean oneTap) {
+    private void start(final String extra, final String name, final boolean oneTap) {
         progress.setVisibility(View.VISIBLE);
         action.setVisibility(View.GONE);
         statusView.setTextColor(Ui.TEXT);
@@ -238,13 +254,18 @@ public class PairActivity extends WorkActivity {
         runBg(new Runnable() {
             @Override
             public void run() {
-                doPair(extra, oneTap);
+                doPair(extra, name, oneTap);
             }
         });
     }
 
+    /** 默认手机名：自动读设备名称，没有再读设备型号（营销名），都读不到才用认证型号，见 DeviceName。 */
+    private String defaultName(boolean oneTap) {
+        return DeviceName.get(this) + (oneTap ? "（一键测试）" : "");
+    }
+
     /** 后台线程。oneTap：测试用的一键解锁（密钥不要求指纹）。 */
-    private void doPair(String extra, boolean oneTap) {
+    private void doPair(String extra, String chosenName, boolean oneTap) {
         final PcRecord old = Store.get(this, pu.pcId);
         String alias = PcRecord.aliasFor(pu.pcId);
         Transport tr = null;
@@ -255,7 +276,14 @@ public class PairActivity extends WorkActivity {
             PublicKey pub = KeyHelper.generate(alias, oneTap);
             byte[] pubDer = pub.getEncoded();
             /* 一键模式在手机名后面做个记号，电脑上 list 时能看出这条配对不验证指纹 */
-            byte[] name = Proto.phoneName(Build.MODEL + (oneTap ? "（一键测试）" : ""));
+            String nm = chosenName == null || chosenName.trim().isEmpty() ? defaultName(oneTap) : chosenName.trim();
+            if (oneTap && !nm.endsWith("（一键测试）")) {
+                /* 先按 64 字节截断基础名再拼后缀：一键测试靠名字后缀标记，不能让它被 Proto.phoneName 截掉 */
+                byte[] base = Proto.phoneName(nm);
+                String limit = new String(base, java.nio.charset.StandardCharsets.UTF_8);
+                nm = limit + "（一键测试）";
+            }
+            byte[] name = Proto.phoneName(nm);
             byte[] t = Proto.pairT(pu.pcId, phoneId, name, pubDer);
             byte[] mac = Proto.pairMac(pu.code, t);
 

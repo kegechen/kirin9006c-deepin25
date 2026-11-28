@@ -10,6 +10,7 @@ import android.net.NetworkCapabilities;
 import android.os.Build;
 import android.util.Log;
 
+import org.hisi.phoneunlock.proto.LanAddress;
 import org.hisi.phoneunlock.proto.Target;
 import org.hisi.phoneunlock.proto.TcpTransport;
 import org.hisi.phoneunlock.proto.Transport;
@@ -83,7 +84,8 @@ final class Connector {
 
     /**
      * 当默认网络不是 Wi-Fi（例如连的 Wi-Fi 没有互联网，系统改走了移动数据）时，把 socket 绑到 Wi-Fi 上，
-     * 这样局域网地址才走得通。回环地址（adb reverse 调试用的 127.0.0.1）不绑。
+     * 这样局域网地址才走得通。只绑局域网地址：回环地址（adb reverse 调试用的 127.0.0.1）、Tailscale 地址（100.64.0.0/10）、
+     * 公网地址都不绑，按系统默认路由走（Tailscale 的 VPN、移动数据），硬绑到 Wi-Fi 上反而不通。
      */
     static final class WifiBinder implements TcpTransport.Binder {
         private final Network wifi;
@@ -113,7 +115,7 @@ final class Connector {
 
         @Override
         public void bind(Socket s, InetAddress target) throws IOException {
-            if (wifi != null && !target.isLoopbackAddress()) wifi.bindSocket(s);
+            if (wifi != null && LanAddress.isLan(target)) wifi.bindSocket(s);
         }
 
         @Override

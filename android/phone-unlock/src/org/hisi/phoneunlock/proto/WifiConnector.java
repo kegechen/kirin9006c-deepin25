@@ -21,7 +21,8 @@ import java.util.concurrent.ThreadFactory;
 
 /**
  * Wi-Fi 连接：同时做 UDP 发现（广播 + 二维码 IP 单播，约 1.2 秒）和直连（二维码 IP、额外地址），
- * 每个 TCP 连接超时 1.5 秒；连上后发 PING 确认是这台电脑（PONG 的 pc_id 不对就丢掉），先到先用。
+ * 局域网/回环地址的 TCP 连接超时 1.5 秒（远端地址如 Tailscale 放宽，见 isFar）；连上后发 PING 确认是这台电脑
+ * （PONG 的 pc_id 不对就丢掉），先到先用。
  */
 public final class WifiConnector {
     private final Target target;
@@ -79,7 +80,10 @@ public final class WifiConnector {
             disc.setDaemon(true);
             disc.start();
 
-            long hardDeadline = System.currentTimeMillis() + discoveryMs + connectMs + pingMs + 1500;
+            boolean anyFar = false;
+            for (HostPort hp : target.direct) anyFar |= isFar(hp);
+            long worst = Math.max(discoveryMs + connectMs + pingMs, anyFar ? farConnectMs() + farPingMs() : 0);
+            long hardDeadline = System.currentTimeMillis() + worst + 1500;
             synchronized (lock) {
                 while (winner == null && (discovering || pending > 0)) {
                     long left = hardDeadline - System.currentTimeMillis();
@@ -111,6 +115,30 @@ public final class WifiConnector {
         }
     }
 
+    /**
+     * 远端地址：不是局域网、也不是回环的（Tailscale、公网、主机名）。第一次连要先做 WireGuard 握手、可能还要走中继，
+     * 1.5 秒的局域网超时不够，放宽到 3 倍（连接）和 2 倍（PING）；它们连不上时只是多等一会儿，不影响先到先用。
+     */
+    private static boolean isFar(HostPort hp) {
+        if (hp.isLoopback()) return false;
+        String h = hp.host;
+        boolean literal = h.indexOf(':') >= 0 || h.matches("\\d{1,3}(\\.\\d{1,3}){3}");
+        if (!literal) return true;
+        try {
+            return !LanAddress.isLan(InetAddress.getByName(h)); /* 地址字面量，不会查 DNS */
+        } catch (UnknownHostException e) {
+            return false;
+        }
+    }
+
+    private int farConnectMs() {
+        return connectMs * 3;
+    }
+
+    private int farPingMs() {
+        return pingMs * 2;
+    }
+
     private void attempt(final HostPort hp, final String via) {
         synchronized (lock) {
             if (winner != null || finished || !tried.add(hp.toString().toLowerCase())) return;
@@ -135,11 +163,12 @@ public final class WifiConnector {
         TcpTransport t = null;
         String err = null;
         try {
-            Logger.i("Wi-Fi 试连 " + hp + "（" + via + "）");
-            t = TcpTransport.open(hp, connectMs, binder);
+            boolean far = isFar(hp);
+            Logger.i("Wi-Fi 试连 " + hp + "（" + via + (far ? "，远端地址，超时放宽" : "") + "）");
+            t = TcpTransport.open(hp, far ? farConnectMs() : connectMs, binder);
             String id = null;
             try {
-                id = new Client(t).ping(pingMs);
+                id = new Client(t).ping(far ? farPingMs() : pingMs);
             } catch (PeerException pe) {
                 /* 回了 ERR 说明是这套协议的电脑，只是不认 PING，照样用（HELLO 会再确认身份） */
                 Logger.i(hp + " 不认 PING（ERR " + pe.code + "），继续用");
