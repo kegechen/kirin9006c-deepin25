@@ -47,6 +47,7 @@
 
 typedef struct {
     char *id, *user, *name;
+    char *alias;           /* 用户起的别名，只管显示；NULL = 显示 name（手机配对时上报名） */
     GBytes *pub;           /* EC P-256 公钥，X.509 SubjectPublicKeyInfo DER */
     guint8 secret[32];     /* 配对时由配对码导出的 S */
     gint64 paired;
@@ -56,6 +57,12 @@ typedef struct {
     guint away_timer;      /* 蓝牙断开后的锁屏倒计时 */
 } Phone;
 
+/* 给用户看的名：有别名用别名，没有就用手机上报名 */
+static const char *p_disp(const Phone *p)
+{
+    return p->alias ? p->alias : p->name;
+}
+
 typedef struct {
     char phone_id[33];
     guint8 cn[32], pn[16], ks[32];
@@ -63,6 +70,7 @@ typedef struct {
 } Chal;
 
 static GHashTable *phones;   /* phone_id → Phone* */
+static GHashTable *online;   /* 现在连着电脑的 phone_id → gint64*（连上的单调时间，微秒） */
 static char pc_id[33];
 static uid_t link_uid = (uid_t)-1;
 static Chal chals[MAX_CHALS];
@@ -72,7 +80,12 @@ static struct {
     guint8 code[16];
     guint timer;
     int bad;
+    char *owner;           /* 经 User 接口（控制中心）开始配对的客户端的总线名；sudo hisi-phone pair 开的是 NULL */
+    guint owner_watch;     /* 那个客户端退出就取消配对 */
 } pairing;
+
+static void pair_close(const char *result, const char *name);
+static void phones_changed(void);
 static struct {
     gint64 window;
     int count;
@@ -214,6 +227,7 @@ static void phone_free(gpointer data)
     g_free(p->id);
     g_free(p->user);
     g_free(p->name);
+    g_free(p->alias);
     if (p->pub)
         g_bytes_unref(p->pub);
     OPENSSL_cleanse(p->secret, sizeof p->secret);
@@ -237,6 +251,8 @@ static void store_save(void)
 
         g_key_file_set_string(kf, grp, "user", p->user);
         g_key_file_set_string(kf, grp, "name", p->name);
+        if (p->alias)
+            g_key_file_set_string(kf, grp, "alias", p->alias);
         b64 = g_base64_encode(g_bytes_get_data(p->pub, NULL), g_bytes_get_size(p->pub));
         g_key_file_set_string(kf, grp, "pub", b64);
         g_free(b64);
@@ -287,6 +303,11 @@ static void store_load(void)
         p->id = g_strdup(*g + 6);
         p->user = g_key_file_get_string(kf, *g, "user", NULL);
         p->name = g_key_file_get_string(kf, *g, "name", NULL);
+        p->alias = g_key_file_get_string(kf, *g, "alias", NULL);
+        if (p->alias && !*p->alias) {
+            g_free(p->alias);
+            p->alias = NULL;
+        }
         p->paired = g_key_file_get_int64(kf, *g, "paired", NULL);
         pub = g_key_file_get_string(kf, *g, "pub", NULL);
         sec = g_key_file_get_string(kf, *g, "secret", NULL);
@@ -564,6 +585,19 @@ static char *info_text(const Phone *p)
     return g_string_free(s, FALSE);
 }
 
+static guint user_phone_count(const char *user)
+{
+    GHashTableIter it;
+    Phone *p;
+    guint n = 0;
+
+    g_hash_table_iter_init(&it, phones);
+    while (g_hash_table_iter_next(&it, NULL, (gpointer *)&p))
+        if (!g_strcmp0(p->user, user))
+            n++;
+    return n;
+}
+
 static gboolean held(Phone *p)
 {
     return p->hold_until && g_get_monotonic_time() < p->hold_until;
@@ -579,7 +613,7 @@ static void m_pair(GVariant *params, GDBusMethodInvocation *inv)
     guint8 want[32], mac2[32];
     int status = PS_BAD_REQUEST;
     EVP_PKEY *k;
-    Phone *p;
+    Phone *p, *old;
 
     g_variant_get(params, "(&s&s@ay@ay)", &id, &name, &vpub, &vmac);
     pub = ay(vpub, &publen);
@@ -608,14 +642,26 @@ static void m_pair(GVariant *params, GDBusMethodInvocation *inv)
         WARN("手机“%s”配对校验不过（二维码不是这次的？）", name);
         if (++pairing.bad >= PAIR_BAD_MAX) {
             WARN("配对校验失败太多次，关闭配对");
-            pairing.open = FALSE;
+            pair_close("bad_code", NULL);
         }
+        goto out;
+    }
+    /* 已绑定到上限时只允许“重新配对已有的手机”（同一个手机 ID、且是同一个用户，替换旧记录）。
+     * 不能按全局 ID 放行：Paired 信号会把 ID 广播出去，别的 users 拿它顶掉自己的 5 台上限、还会把对方手机弄失效 */
+    old = g_hash_table_lookup(phones, id);
+    if (old && g_strcmp0(old->user, pairing.user))
+        old = NULL;   /* 这台手机是别人的：当作新手机，照常受上限约束 */
+    if (!old && user_phone_count(pairing.user) >= PHONES_PER_USER) {
+        status = PS_TOO_MANY;
+        WARN("用户 %s 已绑定 %d 台手机（上限），拒绝新手机“%s”", pairing.user, PHONES_PER_USER, name);
         goto out;
     }
     p = g_new0(Phone, 1);
     p->id = g_strdup(id);
     p->user = g_strdup(pairing.user);
     p->name = g_strdup(name);
+    if (old)
+        p->alias = g_strdup(old->alias);   /* 重新配对保留用户设的别名，别因为换密钥就丢了 */
     p->pub = g_bytes_new(pub, publen);
     p->paired = g_get_real_time() / G_USEC_PER_SEC;
     m = g_byte_array_new();
@@ -633,10 +679,10 @@ static void m_pair(GVariant *params, GDBusMethodInvocation *inv)
     store_save();
     INFO("已配对手机“%s”（%s），用户 %s", p->name, p->id, p->user);
     g_dbus_connection_emit_signal(bus, NULL, UI_PATH, ADMIN_IFACE, "Paired",
-                                  g_variant_new("(sss)", p->id, p->user, p->name), NULL);
+                                  g_variant_new("(sss)", p->id, p->user, p_disp(p)), NULL);
+    phones_changed();
     /* 配对码只用一次 */
-    pairing.open = FALSE;
-    OPENSSL_cleanse(pairing.code, sizeof pairing.code);
+    pair_close("paired", p_disp(p));
     g_dbus_method_invocation_return_value(inv, g_variant_new("(i@ay)", PS_OK,
         g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, mac2, 32, 1)));
     g_byte_array_unref(t);
@@ -821,7 +867,7 @@ static void m_unlock(GVariant *params, GDBusMethodInvocation *inv)
     }
     p->fails = 0;
     {
-        char *how = g_strdup_printf("手机“%s”指纹验证通过", p->name);
+        char *how = g_strdup_printf("手机“%s”指纹验证通过", p_disp(p));
         status = bio_unlock_user(p->user, how);
         g_free(how);
     }
@@ -868,7 +914,7 @@ static void m_lock(GVariant *params, GDBusMethodInvocation *inv)
         WARN("手机“%s”的锁屏请求校验不对", p->name);
         goto out;
     }
-    how = g_strdup_printf("手机“%s”要求锁屏", p->name);
+    how = g_strdup_printf("手机“%s”要求锁屏", p_disp(p));
     status = bio_lock_user(p->user, how);
     g_free(how);
 out:
@@ -885,7 +931,7 @@ static gboolean away_fire(gpointer data)
 
     p->away_timer = 0;
     p->away = 0;   /* 锁一次就算关了，手机连回来重新开 */
-    how = g_strdup_printf("手机“%s”离开（蓝牙断开后没连回来）", p->name);
+    how = g_strdup_printf("手机“%s”离开（蓝牙断开后没连回来）", p_disp(p));
     r = bio_lock_user(p->user, how);
     g_free(how);
     if (r != PS_OK)
@@ -971,19 +1017,74 @@ static void m_gone(GVariant *params, GDBusMethodInvocation *inv)
     g_dbus_method_invocation_return_value(inv, g_variant_new("(i)", p ? PS_OK : PS_UNKNOWN_PHONE));
 }
 
-/* 【org.hisi.BioUnlock1.Admin：root 的配对命令调用】 */
+/* 【手机在线】hisi-phone-link 报告哪些已配对的手机现在连着电脑（蓝牙连接或 Wi-Fi 会话里 HELLO 过），
+ * 只在内存里；锁屏界面据此显示“手机已连接”。HELLO 不证明手机身份（真正的验证在解锁时），所以这只是界面提示，
+ * 不影响解锁。hisi-phone-link 重启或不在了，会话都断了，下次连上会重新报。 */
 
-static gboolean pair_timeout(gpointer data)
+static void m_presence(GVariant *params, GDBusMethodInvocation *inv)
 {
-    pairing.timer = 0;
-    if (pairing.open)
-        INFO("配对超时，已关闭");
-    pairing.open = FALSE;
-    OPENSSL_cleanse(pairing.code, sizeof pairing.code);
-    return G_SOURCE_REMOVE;
+    const char *id;
+    gboolean on;
+    Phone *p;
+
+    g_variant_get(params, "(&sb)", &id, &on);
+    p = valid_id(id) ? g_hash_table_lookup(phones, id) : NULL;
+    if (p) {
+        gint64 *since = g_hash_table_lookup(online, id);
+
+        if (on && !since) {
+            since = g_new(gint64, 1);
+            *since = g_get_monotonic_time();
+            g_hash_table_insert(online, g_strdup(id), since);
+            INFO("手机“%s”已连接", p->name);
+            bio_ui_refresh();
+            phones_changed();
+        } else if (!on && since) {
+            g_hash_table_remove(online, id);
+            INFO("手机“%s”已断开", p->name);
+            bio_ui_refresh();
+            phones_changed();
+        }
+    }
+    g_dbus_method_invocation_return_value(inv, g_variant_new("(i)", p ? PS_OK : PS_UNKNOWN_PHONE));
 }
 
-static void pair_stop(void)
+const char *phone_online_name(const char *user, guint *count)
+{
+    GHashTableIter it;
+    gpointer k, v;
+    const char *best = NULL;
+    gint64 best_since = 0;
+
+    *count = 0;
+    g_hash_table_iter_init(&it, online);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        Phone *p = g_hash_table_lookup(phones, k);
+
+        if (!p || g_strcmp0(p->user, user))
+            continue;
+        (*count)++;
+        if (!best || *(gint64 *)v > best_since) {
+            best = p_disp(p);
+            best_since = *(gint64 *)v;
+        }
+    }
+    return best;
+}
+
+/* 【配对和管理：Admin 接口（root，sudo hisi-phone …）和 User 接口（桌面用户自己，控制中心插件）共用】 */
+
+#define POLKIT_TIMEOUT_MS (5 * 60 * 1000)   /* 等用户在认证框里输密码 */
+
+/* 只说“变了”、不带内容，谁都收得到；客户端再用 User.List 只看自己的 */
+static void phones_changed(void)
+{
+    g_dbus_connection_emit_signal(bus, NULL, UI_PATH, USER_IFACE, "Changed", NULL, NULL);
+}
+
+/* 关闭配对窗口，配对码作废。result：paired / timeout / cancelled / replaced / bad_code。
+ * 经控制中心开的配对，结果单播给开配对的那个客户端（PairEnded），别人收不到 */
+static void pair_close(const char *result, const char *name)
 {
     if (pairing.timer) {
         g_source_remove(pairing.timer);
@@ -991,32 +1092,78 @@ static void pair_stop(void)
     }
     pairing.open = FALSE;
     OPENSSL_cleanse(pairing.code, sizeof pairing.code);
+    if (pairing.owner_watch) {
+        g_bus_unwatch_name(pairing.owner_watch);
+        pairing.owner_watch = 0;
+    }
+    if (pairing.owner) {
+        g_dbus_connection_emit_signal(bus, pairing.owner, UI_PATH, USER_IFACE, "PairEnded",
+                                      g_variant_new("(ss)", result, name ? name : ""), NULL);
+        g_clear_pointer(&pairing.owner, g_free);
+    }
+}
+
+static gboolean pair_timeout(gpointer data)
+{
+    pairing.timer = 0;
+    if (pairing.open)
+        INFO("配对超时，已关闭");
+    pair_close("timeout", NULL);
+    return G_SOURCE_REMOVE;
+}
+
+static void owner_vanished(GDBusConnection *c, const char *name, gpointer data)
+{
+    if (pairing.open && !g_strcmp0(pairing.owner, name)) {
+        INFO("开配对的控制中心退出了，取消配对");
+        pair_close("cancelled", NULL);
+    }
+}
+
+/* 能配手机、管手机的“桌面用户”：普通用户 uid，排除 greeter 用户 dde 和 hisi-phone-link 的 hisi-phone */
+static gboolean desktop_user(const struct passwd *pw)
+{
+    return pw && pw->pw_uid >= 1000 && pw->pw_uid < 60000 && strcmp(pw->pw_name, "dde")
+        && strcmp(pw->pw_name, LINK_USER);
+}
+
+/* 开配对窗口（顶掉没完成的），回 (电脑 ID, 配对码, 主机名)。owner 非 NULL 时那个客户端退出就取消 */
+static void pair_open(const char *user, guint32 secs, const char *owner, GDBusMethodInvocation *inv)
+{
+    char host[256] = "";
+
+    if (pairing.open)
+        INFO("新的配对顶掉了还没完成的配对");
+    pair_close("replaced", NULL);
+    g_free(pairing.user);
+    pairing.user = g_strdup(user);
+    rand_bytes(pairing.code, sizeof pairing.code);
+    pairing.bad = 0;
+    pairing.open = TRUE;
+    secs = CLAMP(secs, PAIR_MIN_S, PAIR_MAX_S);
+    pairing.timer = g_timeout_add_seconds(secs, pair_timeout, NULL);
+    if (owner) {
+        pairing.owner = g_strdup(owner);
+        pairing.owner_watch = g_bus_watch_name_on_connection(bus, owner, G_BUS_NAME_WATCHER_FLAGS_NONE,
+                                                             NULL, owner_vanished, NULL, NULL);
+    }
+    gethostname(host, sizeof host - 1);
+    INFO("开始配对（用户 %s，%u 秒%s）", user, secs, owner ? "，在控制中心" : "");
+    g_dbus_method_invocation_return_value(inv, g_variant_new("(s@ays)", pc_id,
+        g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, pairing.code, sizeof pairing.code, 1), host));
 }
 
 static void m_pair_start(GVariant *params, GDBusMethodInvocation *inv)
 {
     const char *user;
     guint32 secs;
-    struct passwd *pw;
-    char host[256] = "";
 
     g_variant_get(params, "(&su)", &user, &secs);
-    pw = getpwnam(user);
-    if (!pw || pw->pw_uid < 1000 || !strcmp(user, "dde") || !strcmp(user, LINK_USER)) {
+    if (!desktop_user(getpwnam(user))) {
         g_dbus_method_invocation_return_error(inv, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS, "不是桌面用户：%s", user);
         return;
     }
-    pair_stop();
-    g_free(pairing.user);
-    pairing.user = g_strdup(user);
-    rand_bytes(pairing.code, sizeof pairing.code);
-    pairing.bad = 0;
-    pairing.open = TRUE;
-    pairing.timer = g_timeout_add_seconds(CLAMP(secs, PAIR_MIN_S, PAIR_MAX_S), pair_timeout, NULL);
-    gethostname(host, sizeof host - 1);
-    INFO("开始配对（用户 %s，%u 秒）", user, CLAMP(secs, PAIR_MIN_S, PAIR_MAX_S));
-    g_dbus_method_invocation_return_value(inv, g_variant_new("(s@ays)", pc_id,
-        g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, pairing.code, sizeof pairing.code, 1), host));
+    pair_open(user, secs, NULL, inv);
 }
 
 static void m_list(GDBusMethodInvocation *inv)
@@ -1028,25 +1175,142 @@ static void m_list(GDBusMethodInvocation *inv)
     g_variant_builder_init(&b, G_VARIANT_TYPE("a(ssst)"));
     g_hash_table_iter_init(&it, phones);
     while (g_hash_table_iter_next(&it, NULL, (gpointer *)&p))
-        g_variant_builder_add(&b, "(ssst)", p->id, p->user, p->name, (guint64)p->paired);
+        g_variant_builder_add(&b, "(ssst)", p->id, p->user, p_disp(p), (guint64)p->paired);
     g_dbus_method_invocation_return_value(inv, g_variant_new("(a(ssst))", &b));
 }
 
-static void m_unpair(GVariant *params, GDBusMethodInvocation *inv)
+/* User.List：只列调用者自己的手机，带在线状态和每用户上限 */
+static void m_user_list(const char *user, GDBusMethodInvocation *inv)
+{
+    GVariantBuilder b;
+    GHashTableIter it;
+    Phone *p;
+
+    g_variant_builder_init(&b, G_VARIANT_TYPE("a(sstb)"));
+    g_hash_table_iter_init(&it, phones);
+    while (g_hash_table_iter_next(&it, NULL, (gpointer *)&p))
+        if (!g_strcmp0(p->user, user))
+            g_variant_builder_add(&b, "(sstb)", p->id, p_disp(p), (guint64)p->paired,
+                                  g_hash_table_contains(online, p->id));
+    g_dbus_method_invocation_return_value(inv, g_variant_new("(a(sstb)u)", &b, (guint32)PHONES_PER_USER));
+}
+
+/* only_user 非 NULL（User 接口）时只能删这个用户自己的手机，别人的当作没有 */
+static void m_unpair(GVariant *params, GDBusMethodInvocation *inv, const char *only_user)
 {
     const char *id;
-    gboolean removed;
+    Phone *p;
+    gboolean removed = FALSE;
 
     g_variant_get(params, "(&s)", &id);
-    removed = g_hash_table_remove(phones, id);
-    if (removed) {
+    p = g_hash_table_lookup(phones, id);
+    if (p && (!only_user || !strcmp(p->user, only_user))) {
+        INFO("已删除手机“%s”（%s）%s", p_disp(p), id, only_user ? "，在控制中心删的" : "");
+        g_hash_table_remove(phones, id);
+        removed = TRUE;
         for (int i = 0; i < MAX_CHALS; i++)
             if (!strcmp(chals[i].phone_id, id))
                 chal_drop(&chals[i]);
+        if (g_hash_table_remove(online, id))
+            bio_ui_refresh();
         store_save();
-        INFO("已删除手机 %s", id);
+        phones_changed();
     }
     g_dbus_method_invocation_return_value(inv, g_variant_new("(b)", removed));
+}
+
+/* 设置别名（锁屏、列表、手机 App 里显示的这台电脑列表用不到它——只影响电脑这边显示什么）。
+ * 别名不动配对时手机上报的名字（name 永远保留），空名 = 清除别名恢复原名。
+ * 配对密钥、密钥保护方式都不变，所以不用重新配对。only_user 同 m_unpair */
+static void m_rename(GVariant *params, GDBusMethodInvocation *inv, const char *only_user)
+{
+    const char *id, *name;
+    Phone *p;
+
+    g_variant_get(params, "(&s&s)", &id, &name);
+    if (strlen(name) > NAME_MAX_LEN) {
+        g_dbus_method_invocation_return_error(inv, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
+                                              "最长 %d 字节", NAME_MAX_LEN);
+        return;
+    }
+    for (const char *c = name; *c; c++) {
+        if ((guchar)*c < 0x20 || (guchar)*c == 0x7f) {
+            g_dbus_method_invocation_return_error(inv, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS, "别名里不能有控制字符");
+            return;
+        }
+    }
+    p = g_hash_table_lookup(phones, id);
+    if (p && only_user && strcmp(p->user, only_user))
+        p = NULL;
+    if (p) {
+        g_free(p->alias);
+        p->alias = *name ? g_strdup(name) : NULL;
+        if (p->alias)
+            INFO("手机“%s”（%s）的别名设为“%s”", p->name, p->id, p->alias);
+        else
+            INFO("手机“%s”（%s）的别名清除了，恢复显示上报名", p->name, p->id);
+        store_save();
+        if (g_hash_table_contains(online, id))
+            bio_ui_refresh();
+        phones_changed();
+    }
+    g_dbus_method_invocation_return_value(inv, g_variant_new("(b)", p != NULL));
+}
+
+/* User.PairStart：先问 polkit（org.hisi.bio-unlock.pair-phone，默认要输当前用户的密码），过了再开配对窗口。
+ * 配好的手机能解锁这个用户的会话，所以不能只凭“会话开着”就让配 */
+typedef struct {
+    GDBusMethodInvocation *inv;
+    char *user;
+    guint32 secs;
+} PairAuth;
+
+static void pair_auth_done(GObject *src, GAsyncResult *res, gpointer data)
+{
+    PairAuth *a = data;
+    GError *e = NULL;
+    GVariant *r = g_dbus_connection_call_finish(G_DBUS_CONNECTION(src), res, &e);
+    gboolean ok = FALSE, challenge = FALSE;
+
+    if (r) {
+        GVariant *details;
+
+        g_variant_get(r, "((bb@a{ss}))", &ok, &challenge, &details);
+        g_variant_unref(details);
+        g_variant_unref(r);
+    }
+    if (e) {
+        WARN("向 polkit 确认配对授权失败：%s", e->message);
+        g_dbus_method_invocation_return_error(a->inv, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED,
+                                              "没法确认授权：%s", e->message);
+        g_error_free(e);
+    } else if (!ok) {
+        INFO("用户 %s 在控制中心配对手机，没通过认证", a->user);
+        g_dbus_method_invocation_return_error(a->inv, G_DBUS_ERROR, G_DBUS_ERROR_AUTH_FAILED, "没有通过认证");
+    } else {
+        pair_open(a->user, a->secs, g_dbus_method_invocation_get_sender(a->inv), a->inv);
+    }
+    g_free(a->user);
+    g_free(a);
+}
+
+static void user_pair_start(GVariant *params, GDBusMethodInvocation *inv, const char *user)
+{
+    GVariantBuilder subject, details;
+    PairAuth *a = g_new0(PairAuth, 1);
+
+    g_variant_get(params, "(u)", &a->secs);
+    a->inv = inv;
+    a->user = g_strdup(user);
+    g_variant_builder_init(&subject, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&subject, "{sv}", "name", g_variant_new_string(g_dbus_method_invocation_get_sender(inv)));
+    g_variant_builder_init(&details, G_VARIANT_TYPE("a{ss}"));
+    g_dbus_connection_call(bus, "org.freedesktop.PolicyKit1", "/org/freedesktop/PolicyKit1/Authority",
+                           "org.freedesktop.PolicyKit1.Authority", "CheckAuthorization",
+                           g_variant_new("((sa{sv})sa{ss}us)", "system-bus-name", &subject, POLKIT_PAIR_ACTION,
+                                         &details, (guint32)1 /* AllowUserInteraction */, ""),
+                           G_VARIANT_TYPE("((bba{ss}))"), G_DBUS_CALL_FLAGS_NONE, POLKIT_TIMEOUT_MS, NULL,
+                           pair_auth_done, a);
 }
 
 /* D-Bus 策略已经限定了谁能调哪个接口，这里再按 uid 核对一遍 */
@@ -1093,6 +1357,8 @@ static void phone_method(GDBusConnection *c, const char *sender, const char *pat
         m_away(params, inv);
     } else if (!strcmp(method, "Gone")) {
         m_gone(params, inv);
+    } else if (!strcmp(method, "Presence")) {
+        m_presence(params, inv);
     } else {
         g_dbus_method_invocation_return_error(inv, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD, "没有方法 %s", method);
     }
@@ -1110,15 +1376,54 @@ static void admin_method(GDBusConnection *c, const char *sender, const char *pat
     } else if (!strcmp(method, "PairStop")) {
         if (pairing.open)
             INFO("配对已取消");
-        pair_stop();
+        pair_close("cancelled", NULL);
         g_dbus_method_invocation_return_value(inv, NULL);
     } else if (!strcmp(method, "List")) {
         m_list(inv);
     } else if (!strcmp(method, "Unpair")) {
-        m_unpair(params, inv);
+        m_unpair(params, inv, NULL);
+    } else if (!strcmp(method, "Rename")) {
+        m_rename(params, inv, NULL);
     } else {
         g_dbus_method_invocation_return_error(inv, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD, "没有方法 %s", method);
     }
+}
+
+/* 【org.hisi.BioUnlock1.User：桌面用户自己（控制中心插件）】谁调就按谁的 uid 只管谁的手机 */
+static void user_method(GDBusConnection *c, const char *sender, const char *path, const char *iface,
+                        const char *method, GVariant *params, GDBusMethodInvocation *inv, gpointer data)
+{
+    uid_t uid = caller_uid(inv);
+    struct passwd *pw = uid == (uid_t)-1 ? NULL : getpwuid(uid);
+    char *user;
+
+    if (!desktop_user(pw)) {
+        g_dbus_method_invocation_return_error(inv, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED, "只给桌面用户");
+        return;
+    }
+    user = g_strdup(pw->pw_name);   /* getpwuid 的缓冲区会被后面的 getpw* 覆盖 */
+    if (!strcmp(method, "List")) {
+        m_user_list(user, inv);
+    } else if (!strcmp(method, "Rename")) {
+        m_rename(params, inv, user);
+    } else if (!strcmp(method, "Unpair")) {
+        m_unpair(params, inv, user);
+    } else if (!strcmp(method, "PairStart")) {
+        user_pair_start(params, inv, user);
+    } else if (!strcmp(method, "PairStop")) {
+        /* 只能取消自己（这个客户端）开的配对 */
+        if (pairing.open && !g_strcmp0(pairing.owner, sender)) {
+            INFO("控制中心取消了配对");
+            pair_close("cancelled", NULL);
+        }
+        g_dbus_method_invocation_return_value(inv, NULL);
+    } else if (!strcmp(method, "Lock")) {
+        g_dbus_method_invocation_return_value(inv, g_variant_new("(i)",
+            bio_lock_user(user, "控制中心里点了“锁屏试试”")));
+    } else {
+        g_dbus_method_invocation_return_error(inv, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD, "没有方法 %s", method);
+    }
+    g_free(user);
 }
 
 static const char phone_xml[] =
@@ -1174,6 +1479,11 @@ static const char phone_xml[] =
     "   <arg type='s' name='phone_id' direction='in'/>"
     "   <arg type='i' name='status' direction='out'/>"
     "  </method>"
+    "  <method name='Presence'>"
+    "   <arg type='s' name='phone_id' direction='in'/>"
+    "   <arg type='b' name='online' direction='in'/>"
+    "   <arg type='i' name='status' direction='out'/>"
+    "  </method>"
     " </interface>"
     " <interface name='" ADMIN_IFACE "'>"
     "  <method name='PairStart'>"
@@ -1191,9 +1501,44 @@ static const char phone_xml[] =
     "   <arg type='s' name='phone_id' direction='in'/>"
     "   <arg type='b' name='removed' direction='out'/>"
     "  </method>"
+    "  <method name='Rename'>"
+    "   <arg type='s' name='phone_id' direction='in'/>"
+    "   <arg type='s' name='alias' direction='in'/>"
+    "   <arg type='b' name='renamed' direction='out'/>"
+    "  </method>"
     "  <signal name='Paired'>"
     "   <arg type='s' name='phone_id'/>"
     "   <arg type='s' name='user'/>"
+    "   <arg type='s' name='name'/>"
+    "  </signal>"
+    " </interface>"
+    " <interface name='" USER_IFACE "'>"
+    "  <method name='List'>"
+    "   <arg type='a(sstb)' name='phones' direction='out'/>"
+    "   <arg type='u' name='max_phones' direction='out'/>"
+    "  </method>"
+    "  <method name='Rename'>"
+    "   <arg type='s' name='phone_id' direction='in'/>"
+    "   <arg type='s' name='alias' direction='in'/>"
+    "   <arg type='b' name='renamed' direction='out'/>"
+    "  </method>"
+    "  <method name='Unpair'>"
+    "   <arg type='s' name='phone_id' direction='in'/>"
+    "   <arg type='b' name='removed' direction='out'/>"
+    "  </method>"
+    "  <method name='PairStart'>"
+    "   <arg type='u' name='seconds' direction='in'/>"
+    "   <arg type='s' name='pc_id' direction='out'/>"
+    "   <arg type='ay' name='code' direction='out'/>"
+    "   <arg type='s' name='host' direction='out'/>"
+    "  </method>"
+    "  <method name='PairStop'/>"
+    "  <method name='Lock'>"
+    "   <arg type='i' name='status' direction='out'/>"
+    "  </method>"
+    "  <signal name='Changed'/>"
+    "  <signal name='PairEnded'>"
+    "   <arg type='s' name='result'/>"
     "   <arg type='s' name='name'/>"
     "  </signal>"
     " </interface>"
@@ -1203,6 +1548,7 @@ void phone_init(void)
 {
     static const GDBusInterfaceVTable phone_vt = { phone_method, NULL, NULL };
     static const GDBusInterfaceVTable admin_vt = { admin_method, NULL, NULL };
+    static const GDBusInterfaceVTable user_vt = { user_method, NULL, NULL };
     GError *e = NULL;
     GDBusNodeInfo *node;
     struct passwd *pw;
@@ -1211,6 +1557,7 @@ void phone_init(void)
     if (g_mkdir_with_parents(PHONE_STATE_DIR, 0700))
         WARN("建 %s 失败：%s", PHONE_STATE_DIR, g_strerror(errno));
     phones = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, phone_free);
+    online = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     store_load();
     if (!pc_id[0]) {
         guint8 raw[16];
@@ -1224,7 +1571,8 @@ void phone_init(void)
     node = g_dbus_node_info_new_for_xml(phone_xml, &e);
     if (!node
         || !g_dbus_connection_register_object(bus, UI_PATH, node->interfaces[0], &phone_vt, NULL, NULL, &e)
-        || !g_dbus_connection_register_object(bus, UI_PATH, node->interfaces[1], &admin_vt, NULL, NULL, &e)) {
+        || !g_dbus_connection_register_object(bus, UI_PATH, node->interfaces[1], &admin_vt, NULL, NULL, &e)
+        || !g_dbus_connection_register_object(bus, UI_PATH, node->interfaces[2], &user_vt, NULL, NULL, &e)) {
         WARN("导出手机解锁接口失败：%s", e->message);
         g_error_free(e);
     }

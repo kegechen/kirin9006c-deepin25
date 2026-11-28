@@ -154,6 +154,98 @@ static void away_clear(const char *why)
     g_hash_table_remove_all(aways);
 }
 
+/* 【手机在线】HELLO 成功的手机，在它的连接断开之前算连着电脑：Wi-Fi 看会话，蓝牙看 BlueZ 设备
+ * （蓝牙会话空闲超时关掉时，后台连着的设备还在）。变化（第一路连上 / 最后一路断开）时告诉 hisi-bio-unlock
+ * （Presence），锁屏界面据此显示“手机已连接”。只是界面提示：HELLO 不证明手机身份，解锁要验签。 */
+
+#define TCP_KEY_PREFIX "tcp:"
+
+static GHashTable *present;    /* 来源（tcp:<会话地址> 或 BlueZ 设备路径）→ phone_id */
+
+static gboolean phone_present(const char *phone_id)
+{
+    GHashTableIter it;
+    gpointer v;
+
+    g_hash_table_iter_init(&it, present);
+    while (g_hash_table_iter_next(&it, NULL, &v))
+        if (!strcmp(v, phone_id))
+            return TRUE;
+    return FALSE;
+}
+
+static void presence_done(GObject *src, GAsyncResult *res, gpointer data)
+{
+    GError *e = NULL;
+    GVariant *r = g_dbus_connection_call_finish(bus, res, &e);
+
+    if (r) {
+        g_variant_unref(r);
+    } else {
+        DBG("报告手机在线状态失败：%s", e->message);   /* hisi-bio-unlock 重启时会重报，不用当错误 */
+        g_error_free(e);
+    }
+}
+
+static void presence_send(const char *phone_id, gboolean on)
+{
+    if (!bio_up)
+        return;
+    g_dbus_connection_call(bus, UI_SVC, UI_PATH, PHONE_IFACE, "Presence", g_variant_new("(sb)", phone_id, on),
+                           G_VARIANT_TYPE("(i)"), G_DBUS_CALL_FLAGS_NONE, BIO_TIMEOUT, NULL, presence_done, NULL);
+}
+
+static void present_del(const char *key)
+{
+    char *id = g_strdup(g_hash_table_lookup(present, key));
+
+    if (!id)
+        return;
+    g_hash_table_remove(present, key);
+    if (!phone_present(id))
+        presence_send(id, FALSE);
+    g_free(id);
+}
+
+static void present_add(const char *key, const char *phone_id)
+{
+    char *old = g_strdup(g_hash_table_lookup(present, key));
+    gboolean was = phone_present(phone_id);
+
+    if (!g_strcmp0(old, phone_id)) {
+        g_free(old);
+        return;
+    }
+    g_hash_table_replace(present, g_strdup(key), g_strdup(phone_id));
+    if (!was)
+        presence_send(phone_id, TRUE);
+    /* 同一路连接换了一台手机（蓝牙地址被别的手机用了）：旧的那台如果没有别的连接了就算断开 */
+    if (old && !phone_present(old))
+        presence_send(old, FALSE);
+    g_free(old);
+}
+
+static char *tcp_key(Session *s)
+{
+    return g_strdup_printf(TCP_KEY_PREFIX "%p", (void *)s);
+}
+
+/* 蓝牙那几路全断（适配器关了 / BlueZ 不在了） */
+static void present_del_ble(void)
+{
+    GPtrArray *keys = g_ptr_array_new_with_free_func(g_free);
+    GHashTableIter it;
+    gpointer k;
+
+    g_hash_table_iter_init(&it, present);
+    while (g_hash_table_iter_next(&it, &k, NULL))
+        if (!g_str_has_prefix(k, TCP_KEY_PREFIX))
+            g_ptr_array_add(keys, g_strdup(k));
+    for (guint i = 0; i < keys->len; i++)
+        present_del(g_ptr_array_index(keys, i));
+    g_ptr_array_unref(keys);
+}
+
 static void session_pump(Session *s);
 static void tcp_write_next(Session *s);
 static void ble_send(Session *s, const char *data, gsize len);
@@ -196,6 +288,10 @@ static void session_close(Session *s)
         s->life = 0;
     }
     if (s->kind == KIND_TCP) {
+        char *key = tcp_key(s);
+
+        present_del(key);
+        g_free(key);
         g_cancellable_cancel(s->cancel);
         g_io_stream_close(G_IO_STREAM(s->conn), NULL, NULL);
         n_tcp--;
@@ -290,6 +386,7 @@ static const char *err_text(int code)
     case PS_BUSY:          return "电脑正忙（可能另一台手机正在连接），请稍后再试";
     case PS_BAD_REQUEST:   return "请求格式不对";
     case PS_UNAVAILABLE:   return "电脑上的解锁服务没有运行";
+    case PS_TOO_MANY:      return "这个用户在电脑上已绑定 " G_STRINGIFY(PHONES_PER_USER) " 台手机（上限），请先在电脑上删除一台再配对";
     default:               return "电脑内部错误";
     }
 }
@@ -403,6 +500,16 @@ static void bio_reply(GObject *src, GAsyncResult *res, gpointer data)
     }
     if (op == OP_AWAY && status == PS_OK && s->kind == KIND_BLE && s->dev)
         away_set(s->dev, s->phone_id, s->req_grace);
+    if (op == OP_HELLO && status == PS_OK && !s->closed) {
+        if (s->kind == KIND_TCP) {
+            char *key = tcp_key(s);
+
+            present_add(key, s->phone_id);
+            g_free(key);
+        } else if (s->dev) {
+            present_add(s->dev, s->phone_id);
+        }
+    }
     if (op == OP_SHOT)
         DBG("[%s] 截图 → %d", s->peer, status);
     else if (op == OP_AWAY)
@@ -1240,6 +1347,7 @@ static void bluez_vanished(GDBusConnection *c, const char *name, gpointer data)
     g_clear_pointer(&ble.adapter, g_free);
     adv_stop();
     away_clear("BlueZ 不在了");
+    present_del_ble();
     if (ble_sess)
         session_close(ble_sess);
 }
@@ -1271,6 +1379,7 @@ static void bluez_props(GDBusConnection *c, const char *sender, const char *path
         } else {
             ble.notifying = FALSE;
             away_clear("蓝牙适配器关了");
+            present_del_ble();
             if (ble_sess)
                 session_close(ble_sess);
             adv_stop();
@@ -1279,6 +1388,7 @@ static void bluez_props(GDBusConnection *c, const char *sender, const char *path
         /* 不管是谁断开，内核都可能刚重开了一个整时长的广播：下次注册被拒就等到它到期，不用每秒试 */
         adv_disconnected();
         away_disconnected(path);
+        present_del(path);
         if (ble_sess && !g_strcmp0(ble_sess->dev, path)) {
             session_close(ble_sess);
         } else if (!ble.adv_ok && ble.adapter && !ble_sess) {
@@ -1314,7 +1424,17 @@ static void link_info_done(GObject *src, GAsyncResult *res, gpointer data)
 
 static void bio_appeared(GDBusConnection *c, const char *name, const char *owner, gpointer data)
 {
+    GHashTableIter it;
+    gpointer v;
+    GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
+
     bio_up = TRUE;
+    /* hisi-bio-unlock 重启过：在线表丢了，把还连着的手机重报一遍 */
+    g_hash_table_iter_init(&it, present);
+    while (g_hash_table_iter_next(&it, NULL, &v))
+        if (g_hash_table_add(seen, v))
+            presence_send(v, TRUE);
+    g_hash_table_unref(seen);
     g_dbus_connection_call(bus, UI_SVC, UI_PATH, PHONE_IFACE, "GetLinkInfo", NULL, G_VARIANT_TYPE("(ss)"),
                            G_DBUS_CALL_FLAGS_NONE, 10000, NULL, link_info_done, NULL);
 }
@@ -1339,6 +1459,7 @@ int main(int argc, char **argv)
     verbose = argc > 1 && !strcmp(argv[1], "-v");
     signal(SIGPIPE, SIG_IGN);
     aways = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, away_free);
+    present = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &e);
     if (!bus) {
         LOG(3, "连不上 system bus：%s", e->message);

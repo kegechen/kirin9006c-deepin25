@@ -99,6 +99,11 @@ static struct {
     char *user;
     int fp, face;
 } ui;
+/* 最近一次通知界面的手机连接状态（user 空 = 没有） */
+static struct {
+    char *user, *name;
+} ui_ph;
+static void ui_sync(void);
 #ifdef HISI_BIO_SELFTEST
 static int dbg_fp = -1, dbg_face = -1;
 #endif
@@ -151,11 +156,41 @@ static void ui_current(const char **user, int *fp, int *face)
         *user = st.user;
 }
 
+/* 锁屏界面上的“手机已连接”：锁着、且该用户有手机连着电脑时才有。名字不放进广播信号（任何人都能听），
+ * 信号只通知变了，锁屏界面再调 GetPhone 取（D-Bus 策略只放行 dde） */
+static void ui_phone_sync(void)
+{
+    const char *user = "", *name;
+    char *label = NULL;
+    guint n = 0;
+
+    if (st.locked && st.user && (name = phone_online_name(st.user, &n))) {
+        user = st.user;
+        label = n > 1 ? g_strdup_printf("%s 等 %u 台", name, n) : g_strdup(name);
+    }
+    if (!g_strcmp0(user, ui_ph.user) && !g_strcmp0(label ? label : "", ui_ph.name)) {
+        g_free(label);
+        return;
+    }
+    g_free(ui_ph.user);
+    g_free(ui_ph.name);
+    ui_ph.user = g_strdup(user);
+    ui_ph.name = label ? label : g_strdup("");
+    DBG("界面手机：用户=%s 手机=%s", user, ui_ph.name);
+    g_dbus_connection_emit_signal(bus, NULL, UI_PATH, UI_IFACE, "PhoneChanged", NULL, NULL);
+}
+
+void bio_ui_refresh(void)
+{
+    ui_sync();
+}
+
 static void ui_sync(void)
 {
     const char *user;
     int fp, face;
 
+    ui_phone_sync();
     ui_current(&user, &fp, &face);
     if (!g_strcmp0(user, ui.user) && fp == ui.fp && face == ui.face)
         return;
@@ -772,9 +807,11 @@ static char *locked_session_path(void)
                  g_variant_new("(ss)", LOGIN_SESS, "LockedHint"), G_VARIANT_TYPE("(v)"), &e);
         if (p) {
             GVariant *v = g_variant_get_child_value(p, 0);
+            GVariant *b = g_variant_get_variant(v);
             gboolean locked = FALSE;
 
-            g_variant_get(v, "b", &locked);
+            g_variant_get(b, "b", &locked);
+            g_variant_unref(b);
             g_variant_unref(v);
             g_variant_unref(p);
             if (locked) {
@@ -975,6 +1012,10 @@ static const char ui_xml[] =
     "   <arg type='i' name='face' direction='out'/>"
     "  </method>"
     "  <method name='StartFace'/>"
+    "  <method name='GetPhone'>"
+    "   <arg type='s' name='user' direction='out'/>"
+    "   <arg type='s' name='name' direction='out'/>"
+    "  </method>"
 #ifdef HISI_BIO_SELFTEST
     "  <method name='DebugSetState'>"
     "   <arg type='i' name='fingerprint' direction='in'/>"
@@ -986,6 +1027,7 @@ static const char ui_xml[] =
     "   <arg type='i' name='fingerprint'/>"
     "   <arg type='i' name='face'/>"
     "  </signal>"
+    "  <signal name='PhoneChanged'/>"
     " </interface>"
     "</node>";
 
@@ -994,6 +1036,10 @@ static void ui_method(GDBusConnection *c, const char *sender, const char *path, 
 {
     if (!strcmp(method, "GetState")) {
         g_dbus_method_invocation_return_value(inv, g_variant_new("(sii)", ui.user, ui.fp, ui.face));
+        return;
+    }
+    if (!strcmp(method, "GetPhone")) {
+        g_dbus_method_invocation_return_value(inv, g_variant_new("(ss)", ui_ph.user, ui_ph.name));
         return;
     }
     if (!strcmp(method, "StartFace")) {
@@ -1029,6 +1075,8 @@ static void ui_export(void)
     GDBusNodeInfo *node = g_dbus_node_info_new_for_xml(ui_xml, &e);
 
     ui.user = g_strdup("");
+    ui_ph.user = g_strdup("");
+    ui_ph.name = g_strdup("");
     if (!node || !g_dbus_connection_register_object(bus, UI_PATH, node->interfaces[0], &vtable, NULL, NULL, &e)) {
         WARN("导出锁屏界面接口失败：%s", e->message);
         g_error_free(e);

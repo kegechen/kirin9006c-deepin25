@@ -164,6 +164,26 @@ static char *b64url(const guint8 *d, gsize n)
     return s;
 }
 
+/* 该用户已绑定的手机数；读不到返回 0 */
+static int paired_count(const char *user)
+{
+    GVariant *r = admin("List", NULL, "(a(ssst))", NULL);
+    GVariantIter *it;
+    const char *id, *u, *name;
+    guint64 paired;
+    int n = 0;
+
+    if (!r)
+        return 0;
+    g_variant_get(r, "(a(ssst))", &it);
+    while (g_variant_iter_next(it, "(&s&s&st)", &id, &u, &name, &paired))
+        if (!g_strcmp0(u, user))
+            n++;
+    g_variant_iter_free(it);
+    g_variant_unref(r);
+    return n;
+}
+
 static int cmd_pair(const char *user)
 {
     GError *e = NULL;
@@ -200,6 +220,9 @@ static int cmd_pair(const char *user)
         printf("提示：没有网络也没开蓝牙，手机连不上。\n");
     if (!link_running())
         printf("提示：hisi-phone-link.service 没在运行，手机连不上：sudo systemctl enable --now hisi-phone-link\n");
+    if (paired_count(user) >= PHONES_PER_USER)
+        printf("提示：用户 %s 已绑定 %d 台手机（上限）。只能重新配对已有的手机；新手机请先删除一台：sudo hisi-phone unpair <ID>\n",
+               user, PHONES_PER_USER);
     printf("等待手机……（Ctrl+C 取消）\n");
     fflush(stdout);
 
@@ -259,25 +282,27 @@ static int cmd_list(void)
     return 0;
 }
 
-static int cmd_unpair(const char *prefix)
+/* 按 ID 前缀找唯一一台手机，返回 "ID\t名字"（g_free）；找不到或不唯一时打印原因返回 NULL。*status 是退出码 */
+static char *find_phone(const char *prefix, int *status)
 {
     GError *e = NULL;
-    GVariant *r, *d;
+    GVariant *r;
     GVariantIter *it;
     const char *id, *user, *name;
     guint64 paired;
     char *match = NULL;
     int hits = 0;
-    gboolean removed = FALSE;
 
     if (strlen(prefix) < 4) {
         fprintf(stderr, "ID 至少给前 4 位（sudo hisi-phone list 查看）\n");
-        return 2;
+        *status = 2;
+        return NULL;
     }
     r = admin("List", NULL, "(a(ssst))", &e);
     if (!r) {
         admin_fail("读取", e);
-        return 1;
+        *status = 1;
+        return NULL;
     }
     g_variant_get(r, "(a(ssst))", &it);
     while (g_variant_iter_next(it, "(&s&s&st)", &id, &user, &name, &paired)) {
@@ -292,8 +317,55 @@ static int cmd_unpair(const char *prefix)
     if (hits != 1) {
         fprintf(stderr, hits ? "前缀 %s 对上了多台手机，多给几位\n" : "没有 ID 以 %s 开头的手机\n", prefix);
         g_free(match);
+        *status = 1;
+        return NULL;
+    }
+    return match;
+}
+
+static int cmd_rename(const char *prefix, const char *newname)
+{
+    GError *e = NULL;
+    GVariant *d;
+    char *match;
+    gboolean ok = FALSE;
+    int status = 1;
+
+    if (!g_utf8_validate(newname, -1, NULL)) {
+        fprintf(stderr, "别名不是有效的 UTF-8\n");
+        return 2;
+    }
+    match = find_phone(prefix, &status);
+    if (!match)
+        return status;
+    *strchr(match, '\t') = 0;
+    d = admin("Rename", g_variant_new("(ss)", match, newname), "(b)", &e);
+    if (!d) {
+        admin_fail("设别名", e);
+        g_free(match);
         return 1;
     }
+    g_variant_get(d, "(b)", &ok);
+    g_variant_unref(d);
+    if (ok)
+        printf("已把“%s”的别名设为“%s”\n", match + strlen(match) + 1, newname);
+    else
+        printf("没改成（已经不在了？）%s\n", match + strlen(match) + 1);
+    g_free(match);
+    return ok ? 0 : 1;
+}
+
+static int cmd_unpair(const char *prefix)
+{
+    GError *e = NULL;
+    GVariant *d;
+    char *match;
+    int status = 1;
+    gboolean removed = FALSE;
+
+    match = find_phone(prefix, &status);
+    if (!match)
+        return status;
     *strchr(match, '\t') = 0;
     d = admin("Unpair", g_variant_new("(s)", match), "(b)", &e);
     if (!d) {
@@ -315,6 +387,7 @@ static void usage(void)
             "  hisi-phone pair [用户名]   显示配对二维码，手机“电脑解锁”App 扫码（默认配给 sudo 前的用户）\n"
             "  hisi-phone list            列出已配对的手机\n"
             "  hisi-phone unpair <ID>     删除一台手机（ID 前缀即可）\n"
+            "  hisi-phone rename <ID> <别名>     设手机别名（显示用，空串恢复手机原名；最长 64 字节，不用重新配对）\n"
             "说明见 docs/phone-unlock.md\n");
 }
 
@@ -354,6 +427,8 @@ int phonectl_main(int argc, char **argv)
         return cmd_list();
     if (!strcmp(argv[1], "unpair") && argc > 2)
         return cmd_unpair(argv[2]);
+    if (!strcmp(argv[1], "rename") && argc > 3)
+        return cmd_rename(argv[2], argv[3]);
     usage();
     return 2;
 }

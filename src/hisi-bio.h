@@ -16,6 +16,8 @@
 #define UI_IFACE    "org.hisi.BioUnlock1"
 #define PHONE_IFACE "org.hisi.BioUnlock1.Phone"   /* 只给 hisi-phone-link（手机的 Wi-Fi / 蓝牙收发，用户 hisi-phone） */
 #define ADMIN_IFACE "org.hisi.BioUnlock1.Admin"   /* 只给 root：配对、列出、删除手机 */
+#define USER_IFACE  "org.hisi.BioUnlock1.User"    /* 桌面用户（控制中心插件）：只管自己的手机，配对要过 polkit 认证 */
+#define POLKIT_PAIR_ACTION "org.hisi.bio-unlock.pair-phone"
 
 #define PHONE_STATE_DIR  "/var/lib/hisi-bio"
 #define PHONE_STORE      PHONE_STATE_DIR "/phones.ini"
@@ -35,7 +37,11 @@ enum {
     PS_ERROR,
     PS_BAD_REQUEST,
     PS_UNAVAILABLE,     /* hisi-bio-unlock 没运行（hisi-phone-link 自己报） */
+    PS_TOO_MANY,        /* 该用户已绑定到上限（PHONES_PER_USER），新手机要先删一台 */
 };
+
+/* 每个桌面用户最多绑定的手机数（重新配对已有的手机不算新增） */
+#define PHONES_PER_USER 5
 
 extern int verbose;
 extern GDBusConnection *bus;
@@ -44,9 +50,12 @@ extern GDBusConnection *bus;
 void bio_session_info(const char *user, gboolean *has_session, gboolean *locked, gint64 *locked_for_s);
 int bio_unlock_user(const char *user, const char *how);  /* 解锁该用户的本地图形会话，返回 PS_* */
 int bio_lock_user(const char *user, const char *how);    /* 锁定该用户的本地图形会话（已锁也回 PS_OK），返回 PS_* */
+void bio_ui_refresh(void);                               /* 手机连接状态变了：刷新锁屏界面 */
 
 /* hisi-bio-phone.c */
 void phone_init(void);
+/* 该用户现在连着电脑的手机里最近连上的那台的名字；一台都没有返回 NULL。*count 是连着的台数 */
+const char *phone_online_name(const char *user, guint *count);
 
 /* hisi-bio-phonectl.c：hisi-bio-unlock phone pair / list / unpair（root 运行的客户端） */
 int phonectl_main(int argc, char **argv);
