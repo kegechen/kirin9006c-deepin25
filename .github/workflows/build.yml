@@ -1,0 +1,190 @@
+# 构建 deb（arm64 + amd64）与安卓 APK；推 v* 标签时自动发布 release。
+#
+# deb 的构建环境不是 runner 本身：GitHub 的 Ubuntu 24.04 只有 Qt 6.4，而 deepin 25 用
+# Qt 6.8 + dtk 6.7，ABI 对不上。所以每个架构都在 runner 上现场 debootstrap 一个
+# deepin 25（crimson）chroot（原生架构，不用 qemu），在里面按仓库 Makefile 编译打包。
+# 厂商 blob（libmali 等）不在仓库、也不进 chroot：libmali-compat 用两符号桩链接
+# （见 scripts/build-deb.sh），产物与真机构建一致。
+#
+# Android APK 走 android/phone-unlock/build.sh 的纯 build-tools 链（无 Gradle），
+# 签名用现场生成的 debug key（androiddebugkey/android）。
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    env:
+      # 根 chroot 与 dde-control-center 解包目录（与 GITHUB_WORKSPACE 同盘，够放 1GB+）
+      CHROOT: /srv/deepin
+      DCC_DIR: /srv/dcc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 计算版本号
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0~git${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 建 deepin 25（crimson）chroot
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends debootstrap
+          # crimson 不在 debootstrap 内置发行版里；deepin 是 Debian 派生，借用通用脚本
+          sudo ln -sf sid /usr/share/debootstrap/scripts/crimson
+          sudo debootstrap --no-check-gpg --variant=minbase \
+            --include=ca-certificates \
+            --components=main,community,commercial \
+            --arch=${{ matrix.arch }} \
+            crimson "$CHROOT" https://community-packages.deepin.com/beige/
+
+      - name: chroot 内安装构建依赖
+        run: |
+          # 源换回完整三组件并信任（runner 没有安装 deepin-keyring）
+          printf 'deb [trusted=yes] https://community-packages.deepin.com/beige/ crimson main community commercial\n' \
+            | sudo tee "$CHROOT/etc/apt/sources.list" >/dev/null
+          sudo cp /etc/resolv.conf "$CHROOT/etc/resolv.conf"
+          printf 'Acquire::Languages "none";\nAPT::Install-Recommends "false";\n' \
+            | sudo tee "$CHROOT/etc/apt/apt.conf.d/99ci" >/dev/null
+          # chroot 里不启动任何服务（shebang 必须顶格，不能用带缩进的 heredoc）
+          printf '#!/bin/sh\nexit 101\n' | sudo tee "$CHROOT/usr/sbin/policy-rc.d" >/dev/null
+          sudo chmod +x "$CHROOT/usr/sbin/policy-rc.d"
+          sudo chroot "$CHROOT" bash -ec '
+            set -e
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              gcc g++ make pkg-config dpkg-dev \
+              libwayland-dev libdrm-dev libegl-dev libglvnd-core-dev \
+              libglib2.0-dev libssl-dev \
+              qt6-base-dev qt6-base-dev-tools qt6-declarative-dev
+          '
+
+      - name: 解包 libdde-control-center（只用于链接）
+        run: |
+          sudo mkdir -p "$DCC_DIR"
+          sudo chroot "$CHROOT" bash -ec '
+            set -e
+            cd /tmp
+            apt-get download dde-control-center
+            dpkg-deb -x dde-control-center_*.deb '"$DCC_DIR"'
+            ls '"$DCC_DIR"'/usr/lib/*/libdde-control-center.so
+          '
+
+      - name: 编译并打包 deb
+        run: |
+          sudo mkdir -p "$CHROOT/src"
+          sudo mount --bind "$GITHUB_WORKSPACE" "$CHROOT/src"
+          trap 'sudo umount "$CHROOT/src" || true' EXIT
+          sudo chroot "$CHROOT" env \
+            VERSION="${{ steps.ver.outputs.version }}" \
+            DCC_LIB_DIR="$DCC_DIR" \
+            bash -ec 'cd /src && scripts/build-deb.sh /src/dist'
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+  apk:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK（build-tools 35 + platform 35）
+        run: |
+          SDK=${ANDROID_HOME:-/usr/local/lib/android/sdk}
+          ls "$SDK/platforms" "$SDK/build-tools" || true
+          CMDTOOLS=$(ls -d "$SDK"/cmdline-tools/*/bin 2>/dev/null | head -1)
+          [ -n "$CMDTOOLS" ] || { echo "runner 镜像里没有 cmdline-tools" >&2; exit 1; }
+          yes | "$CMDTOOLS/sdkmanager" --licenses >/dev/null
+          "$CMDTOOLS/sdkmanager" "platforms;android-35" "build-tools;35.0.0" >/dev/null
+
+      - name: ZXing 依赖与签名密钥
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          curl -fsSL -o /tmp/zxing-core.jar \
+            https://repo1.maven.org/maven2/com/google/zxing/core/3.5.2/core-3.5.2.jar
+          if [ -n "$ANDROID_KEYSTORE_B64" ]; then
+            # 仓库 secret 里的 keystore（base64）：与本地 debug.keystore 同签名，可覆盖安装
+            echo "$ANDROID_KEYSTORE_B64" | base64 -d > /tmp/debug.keystore
+          else
+            keytool -genkeypair -keystore /tmp/debug.keystore -alias androiddebugkey \
+              -storepass android -keypass android -keyalg RSA -keysize 2048 \
+              -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: JVM 协议自测
+        run: bash android/phone-unlock/selftest.sh
+
+      - name: 构建 APK
+        run: |
+          JDK="$JAVA_HOME" \
+          ANDROID_JAR=${ANDROID_HOME:-/usr/local/lib/android/sdk}/platforms/android-35/android.jar \
+          BUILD_TOOLS=${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/35.0.0 \
+          ZXING_JAR=/tmp/zxing-core.jar \
+          KEYSTORE=/tmp/debug.keystore \
+          bash android/phone-unlock/build.sh
+
+      - name: 归档
+        run: |
+          V=$(grep -o 'android:versionName="[^"]*"' android/phone-unlock/AndroidManifest.xml | cut -d'"' -f2)
+          mkdir -p dist
+          cp android/phone-unlock/build/phone-unlock.apk "dist/phone-unlock-${V}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [deb, apk]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 发布 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist/
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "kirin9006c-deepin25 $GITHUB_REF_NAME" \
+              --notes "deb 包（arm64 给 L540，amd64 给 x86 的 deepin 25 机器，均不含厂商 blob）与安卓 APK（debug 签名，覆盖安装同签名包即可；本地 debug.keystore 构建的旧版需先卸载）。"
+          fi
