@@ -12,7 +12,8 @@
 |---|---|---|
 | `hisi-bio-unlock`（已有的锁屏指纹 / 人脸服务） | root，无网络 | 保存配对的手机、出一次性挑战、验签、调 logind `UnlockSession`、截锁屏图（降权到桌面用户跑 grim） |
 | `hisi-phone-link` | 专用用户 `hisi-phone` | 只做收发：TCP / UDP 47390（Wi-Fi）和 BLE GATT 外设；把请求经 D-Bus 转给上面的服务，自己不碰密钥 |
-| `hisi-phone`（命令） | root | `pair` 显示配对二维码、`list` 列出、`unpair` 删除 |
+| `hisi-phone`（命令） | root | `pair` 显示配对二维码、`list` 列出、`unpair` 删除、`rename <ID> <别名>` 设手机别名（空串恢复手机原名） |
+| 控制中心插件 `phoneunlock.so` | 桌面用户 | deepin 25 “账户 → 登录方式 → 手机解锁”：不碰命令行也能配对、设别名、删除、锁屏试试；配对要过 polkit（输自己的登录密码） |
 | Android App `org.hisi.phoneunlock` | 手机 | 扫码配对、连接、显示电脑信息、指纹签名、一键锁屏；离开自动锁屏用一个前台服务保持蓝牙连接 |
 
 ## 安全模型
@@ -24,11 +25,27 @@
 - **解锁**：手机发 HELLO → 电脑出 32 字节随机挑战 cn（120 秒有效、只能用一次），并用 S 派生的会话密钥加密电脑信息一起发回
   （手机能解开就说明对方是配对过的那台电脑；旁听的人看不到截图和用户名）→ 用户按指纹 → Keystore 用私钥签
   “电脑 ID + 手机 ID + cn + 手机随机数” → 电脑验签通过才解锁。截获的签名不能重放。
+- **多台手机**：同一个电脑用户最多绑定 5 台（`PHONES_PER_USER`），每台各有自己的密钥和共享密钥，互不影响，删掉一台不影响别的。
+  满了以后新手机配对回 `ERR 13`；同一台手机重新配对（同一个手机 ID）不算新增，可以照常替换旧记录。
 - 签名错 5 次，该手机暂停 5 分钟。指纹数据、私钥都不出手机；手机新录入指纹后 Keystore 密钥自动失效，需要重新配对。
 - 截图只在该用户的会话确实锁着时给，只给锁屏画面。
 - **锁屏不要指纹**：锁屏不泄露任何东西，只要证明是配对过的那部手机（用 HELLO 的会话密钥算 HMAC）就行，防的是局域网里别人乱锁。
 - **离开自动锁屏**只会锁、不会解锁。能让电脑“误锁”的情况（手机关蓝牙、App 被系统清掉、人为干扰蓝牙）最多造成一次锁屏；
   手机重新靠近也不会自动解锁，解锁照样要过指纹。开关只能由配对的手机发（同样要会话密钥的 HMAC），电脑只记在内存里。
+
+## 控制中心插件（deepin 25）
+
+入口在 “账户 → 登录方式 → 手机解锁”（`/usr/lib/<multiarch>/dde-control-center/plugins_v1.0/phoneunlock/`）。
+列表显示绑定的手机（在线状态、配对时间），每台可以设别名、删除；“添加手机…”会先弹 polkit 认证框
+（action `org.hisi.bio-unlock.pair-phone`，输自己的登录密码），过了才显示配对二维码——和 `sudo hisi-phone pair` 的是同一个码。
+插件经系统总线 `org.hisi.BioUnlock1.User` 跟服务说话，服务按调用者 uid 只让他看、改自己的手机；D-Bus 策略在
+`/etc/dbus-1/system.d/org.hisi.BioUnlock1.conf`。
+
+- **别名**：只影响电脑这边显示什么（手机列表、锁屏提示、日志）。手机配对时上报名永远保留，存 `phones.ini` 的 `name=`，
+  别名存 `alias=`（显示名 = 别名优先，没有别名用上报名）。设别名、清除都不用重新配对。
+- **排障**：点“添加手机”没反应、日志反复“没通过认证”，多半是 polkit 认证 agent 注册错了会话（ddm/会话重启过几轮之后常见）：
+  `journalctl -t polkitd` 看 agent 注册在哪个 `unix-session`，控制中心进程环境 `XDG_SESSION_ID` 是哪个，两者要一致；
+  不一致就把 agent 进程迁进 `session-<id>.scope` 再拉起（agent 按 cgroup 归属选会话，认 `XDG_SESSION_ID` 没用）。
 
 ## 协议（版本 1）
 
@@ -58,6 +75,7 @@
 | 10 | 电脑内部错误 |
 | 11 | 请求格式不对 |
 | 12 | 电脑上的解锁服务没运行 |
+| 13 | 该用户已绑定 5 台手机（上限），新手机要先在电脑上删一台（只出现在 PAIR 的回复里） |
 
 ### 配对二维码
 
@@ -84,7 +102,10 @@ hisiphone://pair?v=1&id=<pc_id>&c=<code>&h=<主机名>&u=<用户名>&ip=<ip1,ip2
 ← PAIROK <mac2_b64>
 ```
 
-- `name`：手机名（如 `Build.MODEL`），UTF-8，不超过 64 字节。`pub`：公钥的 X.509 SubjectPublicKeyInfo DER（Java `PublicKey.getEncoded()`）。
+- `name`：手机名，UTF-8，不超过 64 字节，不含控制字符。App 默认自动取：先取“设备名称”（设置里能看到、能改的名字，如 `nova 10`；
+  华为 `unified_device_name`、其它厂商 `device_name`），没有再取设备型号（营销名，如 `Xiaomi 14`，厂商系统属性），再取蓝牙名称，
+  都取不到才用认证型号 `Build.MODEL`；设备名称等于认证型号的（很多手机的默认值）视为没有。配对页可以改。配对后在电脑上设别名
+  （`hisi-phone rename <ID> <别名>`，空串清除；或控制中心里点“别名”）——别名只管电脑这边显示，这个名字保留不动。`pub`：公钥的 X.509 SubjectPublicKeyInfo DER（Java `PublicKey.getEncoded()`）。
 - `T = "hisi-phone-pair-v1" ‖ 0x00 ‖ pc_id ‖ 0x00 ‖ phone_id ‖ 0x00 ‖ name ‖ 0x00 ‖ pub`
 - `mac = HMAC(code, T)`，`mac2 = HMAC(code, "hisi-phone-pair-ok-v1" ‖ 0x00 ‖ T)`。手机必须核对 mac2，不对就当配对失败。
 - 成功后双方：`S = HMAC(code, "hisi-phone-secret-v1" ‖ 0x00 ‖ pc_id ‖ 0x00 ‖ phone_id)`（32 字节）。手机保存 S、丢掉 code。
@@ -168,7 +189,12 @@ hisiphone://pair?v=1&id=<pc_id>&c=<code>&h=<主机名>&u=<用户名>&ip=<ip1,ip2
 - TCP 47390：一条连接是一个会话，可以连续发多行（如 HELLO → SHOT → UNLOCK）。空闲 90 秒电脑断开。
 - 发现（UDP 47390）：手机向 `255.255.255.255:47390` 和二维码里的每个 IP 发 `HISI-PHONE? <pc_id>\n`，
   电脑（pc_id 对得上时）单播回 `HISI-PHONE! <pc_id> <tcp端口>\n`，手机用回包的源地址连 TCP。
-- 手机和电脑必须在同一个局域网（同一网段、路由器没开 AP 隔离）。
+- 手机和电脑在同一个局域网（同一网段、路由器没开 AP 隔离）时，靠 UDP 发现或二维码里的 IP 直连。
+- 不在同一个局域网时可以经 Tailscale：电脑装 Tailscale 后，`hisi-phone pair` 的二维码会带上 `tailscale0` 的地址
+  （`ip=` 里的 100.x.x.x），手机装 Tailscale 登录同一账号即可直连，旧配对在 App 里“编辑额外地址”补上 100.x。
+  App 只把局域网地址绑到 Wi-Fi（私网、链路本地、IPv6 ULA），回环、Tailscale（100.64.0.0/10、fd7a:115c:a1e0::/48）和公网
+  地址走系统默认路由；对这类远端地址连接超时放宽到 3 倍、PING 放宽到 2 倍。UDP 广播发现过不了 Tailscale，靠直连地址。
+  离开自动锁屏（AWAY）只认蓝牙，远程用不了。
 
 ### 蓝牙 BLE
 

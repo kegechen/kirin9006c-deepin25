@@ -1,6 +1,6 @@
 # 远程查看 / 控制（tools/remote-view）
 
-在 Windows 浏览器里看 L540 的屏幕并用键鼠操作，类似远程桌面。锁屏界面也能看、能输入。
+在 Windows 浏览器里看 L540 的屏幕并用键鼠操作，类似远程桌面。锁屏界面也能看、能输入；注销后的登录界面（greeter）要输一次 sudo 密码授权（见下文）。
 
 - 采集：treeland 的 wlr-screencopy，走 dmabuf 路径（见下文“原理”）
 - 缩放和颜色转换：在 Mali GPU 上直接出 I420，CPU 只读结果（GPU 不可用时自动退回 CPU）
@@ -52,6 +52,9 @@ L540 上要有 `gcc make wayland-scanner libwayland-dev libdrm-dev python3-webso
 - 设备上 `~/remote-view` 没有或文件和本机不一致时，自动复制过去；一致就直接启动。首次运行会在设备上编译 `rv-cap`（约 1 分钟），页面等编译完成才打开。
 - 全过程有中文输出：SSH 连接耗时、哪些文件变了、复制了多少、设备端日志、就绪后打开浏览器、退出原因。
 - 本机端口默认 8765，被占用时自动试 8766 到 8785；也可以先设 `$env:RV_PORT`。
+- 设备停在登录界面（注销后）时，会提示输入设备的 sudo 密码，给登录用户加 ACL 后再启动（原因见“原理 / 登录界面”）。密码只经 SSH 的标准输入交给设备上的 `sudo -S`，不进命令行、不落盘；输错会显示 deepin 认证模块给的剩余次数，只剩 1 次时脚本不再尝试，免得把账户锁住。直接回车放弃。
+- 看着看着用户注销了、而且授权已失效时，服务端会退出，窗口里提示输密码，授权后自动重启服务端，页面不用关，自己会重连。
+- `.\rv-go.ps1 --revoke`：撤销上面的 ACL 后退出（不撤销的话 treeland 重启时也会自动失效）。
 - 服从 PowerShell 执行策略；从非交互终端（比如 Claude Code 的工具调用）启动时会自动开一个新的 PowerShell 窗口来跑，不会没反应。
 - 关闭窗口或 Ctrl+C 就停；窗口开着时终端保持连接。
 - 脚本要存成 **带 BOM 的 UTF-8**，否则 Windows PowerShell 5.1 会按 GBK 读，中文乱码甚至语法出错。
@@ -88,9 +91,10 @@ ssh -t -L 8765:127.0.0.1:8765 <用户>@<L540 IP> ~/remote-view/run.sh
 - 鼠标：点击、拖动、右键、中键、滚轮（含横向、高精度滚动）都会转发；坐标按画面比例换算成绝对坐标。
 - 键盘：按物理键位转发（`KeyboardEvent.code`），输入法用 L540 上的。先点一下画面让它拿到焦点。
 - 工具栏“控制”：取消勾选后只看不操作。
-- “Super”：发一次 Super 键（打开启动器）。
+- “锁屏”：发一次 Super+L（依次按下 Super、L，再松开 L、Super）锁定设备屏幕。“控制”取消勾选时不发。想单独发 Super 键，用全屏后的实体 Win 键。
 - “刷新”：立即要一个关键帧（花屏时用）。
 - “全屏”：全屏后浏览器才会把 Win、Alt+Tab、Ctrl+W 之类的系统键交给页面；长按 Esc 退出全屏。鼠标移到顶边会显示工具栏。
+- 设备休眠或熄屏（`wlr-randr` 显示输出 `Enabled: no`）时，treeland 的 wlr-screencopy 会直接 `failed`，连黑屏都抓不到；唤醒屏幕后自动恢复，页面不会一直重连。
 - 同一时间只服务一个页面，新开的页面会把旧的顶掉。网络断开后页面每 3 秒自动重连。
 
 ## 安全
@@ -98,12 +102,13 @@ ssh -t -L 8765:127.0.0.1:8765 <用户>@<L540 IP> ~/remote-view/run.sh
 - 服务端默认只监听 127.0.0.1，只能经 SSH 隧道访问，等于“能 SSH 登录这个用户的人才能看和控制”。
 - WebSocket 只接受本机页面（Origin 为 localhost / 127.0.0.1）发起的连接，防止别的网站借浏览器去连本地端口注入输入。
 - uinput 输入在内核层，锁屏界面也会收到，所以服务端开着时别人只要能连上就能在锁屏输密码。用完关掉。
+- 登录界面的授权只对登录用户本人（ACL `u:<用户>`）开 `/run/treeland` 的 x 和其中 Wayland socket 的 rw，别的用户仍然进不去；不改用户组、不改 `treeland.service`。这个用户本来就能看自己的屏幕、能经 uinput 输入，多出来的只是能连登录界面的合成器。
 
 ## 限制
 
 - 只抓第一个输出（L540 只有内屏 eDP-1）；屏幕分辨率或缩放变化时 `rv-cap` 退出，页面 3 秒后重连。
 - 没有声音、没有剪贴板同步。
-- 服务端跟着用户会话走：锁屏可以，注销回到登录界面后用户的 Wayland socket 没了，用不了。
+- 登录界面要 sudo 授权，而且 treeland 一重启（重启机器、ddm 重启）授权就没了，要重新输密码。
 - 没有硬件编码器可用，编码全靠 CPU：内核里 `CONFIG_VCODEC_VENC` 没开，只有解码节点 `/dev/vcodec_vdec`；`/dev/video0`、`/dev/video1` 是摄像头；`/usr/lib/aarch64-linux-gnu/dri/` 里也没有这颗芯片的 VAAPI 驱动，装 libva / vainfo 没用。嫌占 CPU 可以 `--size 1440x960` 或 `--fps 15`。
 
 ## 原理
@@ -138,6 +143,26 @@ libmali 这边踩到的坑：
 
 顺带发现 CPU 路径的一个问题：treeland 发 `ready` 时它的 GPU 拷贝可能还没写完，而 Mali 驱动没把这次拷贝挂成 dma-buf fence，`DMA_BUF_IOCTL_SYNC` 等不到。CPU 从上往下读，会先读到缓冲区里的旧内容。之后的帧旧内容就是上一帧，看不出来；第一帧却是缓冲区里原有的别的画面，顶部有一条错位的杂色带。CPU 路径现在丢掉第一帧。GPU 路径的读取在 GPU 上和 treeland 的拷贝排好了顺序，没有这个问题。
 
+### 登录界面（greeter）
+
+锁屏和登录界面不是一回事：
+
+- **锁屏**：用户会话还在，用户的 treeland socket（`/run/user/<uid>/treeland.socket`）也在，直接能采集。
+- **登录界面**：注销后用户会话关了，`/run/user/<uid>` 下没有 Wayland socket。屏幕由 `treeland.service` 以 dde 用户运行的 `treeland --lockscreen` 自己画（greeter 是它进程内的 QML，不是单独的客户端），它的 socket 是 `/run/treeland/wayland-0`。`/run/treeland` 是 systemd 按 `RuntimeDirectory=treeland`、`RuntimeDirectoryMode=0700` 建的，属 dde:dde，别的用户连 stat 都不行。
+
+只把用户加进 dde 组没用：目录是 0700，组没有任何权限。所以授权用 ACL（`/run` 是 tmpfs，内核开了 `CONFIG_TMPFS_POSIX_ACL`）：
+
+```sh
+sudo setfacl -m u:uos:rw /run/treeland/wayland-0
+sudo setfacl -m u:uos:x  /run/treeland
+```
+
+连 unix socket 要对 socket 文件有写权限，所以 socket 要 rw；目录只要 x，不给 r（不能列目录，rv-server 按固定名字 `wayland-0`、`wayland-1` 去找）。treeland 重启时 systemd 删掉重建这个目录，ACL 跟着没了。
+
+采集端代码不用变：登录界面时系统里只有这一个 treeland 进程（dde 用户，也是 DRM master），screencopy 抓的是整个输出，dmabuf 认证（`mali_buffer_sharing.auth`）照样由它代做。用户在 video / render / input 组，`/dev/dri/card0` 和 `/dev/uinput` 不依赖当前活动会话。（2026-11-28：检测、授权提示、中途回到登录界面时服务端退出码这几步已实测；授权后在登录界面上的实际采集还没验证。）
+
+`rv-server.py` 每次页面连上都重新找一遍要采集的 socket：先找用户自己 `XDG_RUNTIME_DIR` 下的 `treeland.socket` / `wayland-0` / `wayland-1`，再找 `/run/treeland/wayland-0`、`wayland-1`；每个都真连一下，排除注销后留下的没人监听的旧 socket。设了 `WAYLAND_DISPLAY` 就只用它。`rv-server.py --probe` 只做这一步：能采集退出 0，在登录界面但没权限退出 3，一个 treeland 都没找到退出 4；服务端运行中遇到“回到登录界面且没权限”也以 3 退出，`rv-go.ps1` 据此请求授权并重启服务端。
+
 ### 文件
 
 | 文件 | 说明 |
@@ -145,10 +170,10 @@ libmali 这边踩到的坑：
 | `rv-cap.c` | 采集 + 编码，stdout 输出带 8 字节包头的 H.264（Annex B）；stdin 收 `k` 补关键帧，EOF 退出；`-C` 不用 GPU 转换 |
 | `gpu-conv.c` | 在 Mali GPU 上缩放 + 转 I420，见上文 |
 | `bench.sh` | `./bench.sh [秒数] [rv-cap 参数]`：GPU / CPU 转换各跑一遍，报告帧率、每帧耗时、CPU 占用，解出画面存到 `/tmp/rvbench-*.png`，另存一张 grim 截图用来对比 |
-| `rv-server.py` | HTTP + WebSocket 服务端，每个页面起一个 `rv-cap`，把浏览器的键鼠事件写进 uinput |
+| `rv-server.py` | HTTP + WebSocket 服务端，每个页面起一个 `rv-cap`（起之前找要采集的 treeland，见上文），把浏览器的键鼠事件写进 uinput；`--probe` 只检查能采集哪个 treeland |
 | `index.html` | 页面：WebCodecs 解码、画布显示、键鼠转发 |
-| `run.sh` | L540 上的启动脚本：找 Wayland socket、编译、停掉残留的旧服务端、启动 |
-| `rv-go.ps1` | Windows 一键启动（主脚本）：有输出、自动复制、自动开浏览器、自动挑端口 |
+| `run.sh` | L540 上的启动脚本：编译、停掉残留的旧服务端、启动；退出码 3 / 4 同 `rv-server.py --probe` |
+| `rv-go.ps1` | Windows 一键启动（主脚本）：有输出、自动复制、自动开浏览器、自动挑端口、登录界面请求 sudo 授权 |
 | `rv-go.cmd` | `rv-go.ps1` 的 cmd / 双击包装（出错暂停） |
 | `rv-win.cmd` | Windows 一键启动（老版，只启动不复制） |
 | `scbench.c` | screencopy 测速：`./scbench shm\|dumb [帧数] [存最后一帧的 ppm]`，对比 shm 和 dmabuf 两条路径 |

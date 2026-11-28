@@ -62,7 +62,7 @@ src/                      垫片源码（在目标机上编译）
   nm-station-fix.c          NetworkManager：把永不结束的 nl80211 station dump 改成单次查询
   hisi-bio-unlock.c         锁屏指纹 / 人脸：监听 logind 锁屏，驱动 deepin 的 Authenticate1，通过后 UnlockSession
   hisi-bio-phone.c          同一进程里的手机解锁：配对库、挑战、验签、锁屏截图（root，无网络）
-  hisi-bio-phonectl.c       hisi-phone pair / list / unpair 命令
+  hisi-bio-phonectl.c       hisi-phone pair / list / unpair / rename（设别名）命令
   hisi-phone-link.c         手机解锁的 Wi‑Fi（TCP/UDP 47390）和蓝牙 BLE 收发，低权限用户运行
   tl-lockbio.cpp            锁屏界面的指纹 / 人脸图标和提示（treeland 预加载，换掉锁屏插件里的 UserInput）
   lockbio/                  上面用到的 QML（UserInputHisi.qml）和 LockScreen 模块清单，编进 .so
