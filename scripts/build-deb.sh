@@ -118,6 +118,9 @@ if [ "$1" = configure ]; then
   - 控制中心重开一次才加载“手机解锁”插件；配对：sudo hisi-phone pair
   - 建议重建补丁基线：sudo hisi-patch-check snapshot
 EOT
+    # 全新安装时服务只 enable 未 start（升级则 try-restart 已在跑，不会打印这条）
+    systemctl is-active --quiet hisi-bio-unlock.service || \
+        echo "  - 服务已 enable 未启动：sudo systemctl start hisi-bio-unlock hisi-phone-link hisi-ddm-watchdog（或重启系统）"
 fi
 exit 0
 EOS
@@ -149,10 +152,13 @@ write_preinst
 
 cat > "$STAGE/DEBIAN/prerm" <<'EOS'
 #!/bin/sh
-# 卸载时停服务（升级走 upgrade 分支，不打断正在运行的解锁服务）
+# 卸载时停服务（升级走 upgrade 分支，不打断正在运行的解锁服务）。
+# 清单与 postinst 的 enable 对齐：remove 会删掉这些单元的二进制，漏停会留下
+# 跑着旧进程的 watchdog 和指向已删文件的 patch-check.timer。
 set -e
 if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
     systemctl disable --now hisi-bio-unlock.service hisi-phone-link.service \
+        hisi-ddm-watchdog.service hisi-patch-check.service hisi-patch-check.timer \
         >/dev/null 2>&1 || true
 fi
 exit 0

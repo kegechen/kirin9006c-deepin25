@@ -196,10 +196,12 @@ deb 的内容 = `make install` 的全部产物：垫片 .so、锁屏指纹 / 人
 sudo apt install ./kirin9006c-deepin25_<版本>_arm64.deb   # deepin 25，L540 用 arm64
 ```
 
-postinst 会自动：建 hisi-phone 用户、重载 dbus 策略、enable 手机解锁相关服务（不 start，正在跑的换新版本）、放开控制中心“生物认证”入口。剩余步骤照提示做：重启 treeland（锁屏界面换新 libtl-lockbio，会回到锁屏）、重开控制中心、`sudo hisi-patch-check snapshot`。
+> 之前是手工装机、想用 `dpkg -i` 的话加 `--force-confold`：deb 的 `/etc` 配置都是 conffile，机器上有同名旧文件时 dpkg 会交互确认，脚本/无终端环境里会直接失败。`deepin-authentication` 的两个白名单文件则不用管——preinst 自动 `dpkg-divert` 接管（上游以后升级也不会冲掉补丁），卸载时自动归还。
+
+postinst 会自动：建 hisi-phone 用户、重载 dbus 策略、enable 手机解锁相关服务（不 start，正在跑的换新版本）、放开控制中心“生物认证”入口。剩余步骤照提示做：重启 treeland（锁屏界面换新 libtl-lockbio，会回到锁屏）、重开控制中心、`sudo hisi-patch-check snapshot`；全新安装的服务还没启动，按提示 `systemctl start` 或重启系统。
 
 - deb 主要给**已装好 deepin 25 的机器**升级补丁；从零装机仍用一键脚本。amd64 的 deb 可装在 x86 的 deepin 25 上：手机解锁、控制中心插件可用，Mali 垫片和 treeland drop-in 无用但无害。
-- 卸载：`apt remove` 停服务并还原控制中心“生物认证”入口，保留配对数据；`apt purge` 连配对数据与补丁基线一起清掉。
+- 卸载：`apt remove` 停掉并 disable 全部相关服务（含 watchdog 与自检定时器）、还原控制中心“生物认证”入口、归还 `deepin-authentication` 的白名单文件，保留配对数据；`apt purge` 连配对数据与补丁基线一起清掉。
 - 构建细节见 [.github/workflows/build.yml](.github/workflows/build.yml)：每个架构在 runner 上现起一个 deepin 25（crimson）chroot 原生编译；厂商 libmali 缺席时用桩链接（`scripts/build-deb.sh`），产物的符号表与真机构建一致。APK 用 debug key 签名，与本地构建不同签名时覆盖安装要先卸载；想让 CI 与本地同签名，把 `%USERPROFILE%\.android\debug.keystore` base64 后存为仓库 secret `ANDROID_KEYSTORE_B64`。
 
 ## 补丁自检：hisi-patch-check
