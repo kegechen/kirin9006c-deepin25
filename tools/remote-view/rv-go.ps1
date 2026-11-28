@@ -90,16 +90,18 @@ function Invoke-Sudo([Security.SecureString]$Password, [string]$Script) {
 	$outTask = $p.StandardOutput.ReadToEndAsync()
 	$errTask = $p.StandardError.ReadToEndAsync()
 	$bytes = $null
-	$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
+	$bstr = [IntPtr]::Zero
 	try {
+		$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
 		$bytes = [Text.Encoding]::UTF8.GetBytes([Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) + "`n")
 		$p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
-		$p.StandardInput.Close()
 	} catch {
 		# ssh 已经退出（连不上）时写管道会失败，结果看退出码
 	} finally {
-		[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+		if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
 		if ($bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+		# 无论如何都要关掉 ssh 的输入，否则远端 sudo 一直等密码、这里永远等不到退出
+		try { $p.StandardInput.Close() } catch { }
 	}
 	$p.WaitForExit()
 	$out = $outTask.Result
@@ -129,7 +131,13 @@ function Request-Sudo([string]$Script, [string]$What) {
 				return $false
 			}
 			Fail "  sudo 没通过（密码不对，或者 $User 没有 sudo 权限）："
-			SayIndented $r.Err
+			# 只给了一行密码，sudo 再读时遇到 EOF 会多报一句“没有提供密码”，不是真的没传
+			SayIndented (($r.Err -split "`n" | Where-Object { $_ -notmatch 'no password was provided|没有提供密码' }) -join "`n")
+			# deepin 的 pam_deepin_authentication 连续输错会锁账户，提示里带剩余次数
+			if ($r.Err -match '还可以尝试\s*(\d+)\s*次' -and [int]$Matches[1] -le 1) {
+				Fail '  再错一次设备账户就会被锁定，不再尝试。确认密码后重新运行。'
+				return $false
+			}
 			continue
 		}
 		switch ($r.Code) {
@@ -145,10 +153,9 @@ function Request-Sudo([string]$Script, [string]$What) {
 }
 
 function Grant-Greeter {
-	Say '  屏幕现在是登录界面（greeter）：它由 dde 用户的 treeland 画，socket 在 /run/treeland 下，只有 dde 能连。' Yellow
 	Say "  要用 sudo 给 $User 加 ACL：/run/treeland 可进入、里面的 Wayland socket 可读写。" Yellow
 	Say '  不改用户组、不改服务配置；treeland 重启（比如重启机器）后自动失效，也可以用 --revoke 撤销。' Yellow
-	Say '  密码只经 SSH 交给设备上的 sudo，不保存、不进命令行。' DarkGray
+	Say '  密码只经 SSH 交给设备上的 sudo，不保存、不进命令行。deepin 连续输错几次会锁账户，提示里有剩余次数。' DarkGray
 	if (Request-Sudo $GrantScript '授权') {
 		Say '  已授权。' Green
 		return $true
@@ -309,14 +316,18 @@ try {
 	$probe = [PowerShell]::Create()
 	[void]$probe.AddScript({
 		param($url)
+		$opened = $false
 		for ($i = 0; $i -lt 180; $i++) {
 			try {
 				$q = [Net.WebRequest]::Create("$url/")
 				$q.Proxy = $null
 				$q.Timeout = 2000
 				$q.GetResponse().Close()
-				[Console]::WriteLine("`r`n>>> 服务已就绪，已用默认浏览器打开 $url （没弹出来就手动打开，要用 Chrome / Edge）`r`n")
-				[void][Diagnostics.Process]::Start($url)
+				if (-not $opened) {
+					$opened = $true
+					[Console]::WriteLine("`r`n>>> 服务已就绪，已用默认浏览器打开 $url （没弹出来就手动打开，要用 Chrome / Edge）`r`n")
+					[void][Diagnostics.Process]::Start($url)
+				}
 				return
 			} catch {
 				[Threading.Thread]::Sleep(1000)

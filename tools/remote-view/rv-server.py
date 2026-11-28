@@ -356,7 +356,12 @@ class Server:
                     hdr = await proc.stdout.readexactly(8)
                     typ, flags, _, length = struct.unpack('>BBHI', hdr)
                     data = await proc.stdout.readexactly(length)
-                    if typ == 1:
+                    if typ == 3:
+                        # rv-cap 正在等亮屏 / 放弃：都作为 sticky 提示发给页面。
+                        # 每个 rv-cap 进程对每种状态只发一次，不会刷屏；亮屏后 type 1 config
+                        # 到达时页面会 showMsg('') 清掉。之前只转 flags==0 把"等亮屏"吞了。
+                        await ws.send(json.dumps({'type': 'notice', 'msg': data.decode().strip(), 'sticky': True}))
+                    elif typ == 1:
                         await ws.send(data.decode())
                     elif typ == 2:
                         # send() 在缓冲区满时会等，rv-cap 随之阻塞在写管道上，自然限速

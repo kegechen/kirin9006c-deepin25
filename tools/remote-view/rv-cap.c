@@ -10,6 +10,7 @@
 //
 // 输出（stdout）：包头 8 字节 [type u8][flags u8][0 u16][len u32 大端] + 数据
 //   type 1 = 配置 JSON；type 2 = 一帧 H.264 Annex B，flags bit0 = 关键帧
+//   type 3 = 状态提示（比如等亮屏），页面显示后不自动消失
 // 输入（stdin）：'k' 立即补一个 IDR；EOF 退出
 //
 // 用法：rv-cap [-w 宽] [-h 高] [-r 最大帧率] [-q crf] [-t 线程] [-n 不叠加光标] [-C 不用 GPU 转换]
@@ -511,11 +512,31 @@ int main(int argc, char **argv) {
 	if (!output || !scm || !dmabuf) die("合成器缺 wl_output / wlr-screencopy / linux-dmabuf");
 
 	// 第一帧：协商尺寸、建缓冲区和编码器，用不带 damage 的 copy 立刻拿到画面
-	struct zwlr_screencopy_frame_v1 *fr = zwlr_screencopy_manager_v1_capture_output(scm, overlay_cursor, output);
-	zwlr_screencopy_frame_v1_add_listener(fr, &f_l, NULL);
-	while (!fs.done && !fs.failed)
-		if (wl_display_dispatch(dpy) < 0) die("Wayland 连接断开");
-	if (fs.failed || !fs.has_dma) die("合成器没有提供 dmabuf 采集");
+	// 如果刚亮屏，合成器可能还没把 dmabuf 能力加上，最多重试几次，别让页面反复重连。
+	struct zwlr_screencopy_frame_v1 *fr;
+	int retry;
+	for (retry = 0; retry < 30; retry++) {
+		fr = zwlr_screencopy_manager_v1_capture_output(scm, overlay_cursor, output);
+		zwlr_screencopy_frame_v1_add_listener(fr, &f_l, NULL);
+		while (!fs.done && !fs.failed)
+			if (wl_display_dispatch(dpy) < 0) die("Wayland 连接断开");
+		if (fs.failed || !fs.has_dma) {
+			const char *msg = "合成器暂时不能采集（屏幕可能在休眠），等亮屏 ...\n";
+			if (retry == 0) send_pkt(3, 1, msg, strlen(msg));
+			LOG("%s", msg);
+			zwlr_screencopy_frame_v1_destroy(fr);
+			memset(&fs, 0, sizeof fs);
+			poll(NULL, 0, 1000);
+			wl_display_dispatch_pending(dpy);
+			continue;
+		}
+		break;
+	}
+	if (retry >= 30) {
+		const char *msg = "屏幕一直不能采集，唤醒屏幕后会自动恢复。\n";
+		send_pkt(3, 0, msg, strlen(msg));
+		die(msg);
+	}
 	src_w = fs.dma_w;
 	src_h = fs.dma_h;
 	if (fs.dma_fmt == DRM_FORMAT_XBGR8888 || fs.dma_fmt == DRM_FORMAT_ABGR8888)
@@ -543,6 +564,7 @@ int main(int argc, char **argv) {
 	for (;;) {
 		wl_display_dispatch_pending(dpy);
 		if (copying && fs.failed) die("采集失败（输出变化？）");
+		if (copying && fs.done && !fs.has_dma) die("合成器没有提供 dmabuf 采集");
 		if (copying && fs.done && (fs.dma_w != (uint32_t)src_w || fs.dma_h != (uint32_t)src_h))
 			die("输出尺寸变了，退出由上层重启");
 		if (copying && fs.ready) {

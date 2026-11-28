@@ -28,7 +28,7 @@ canvas.ctl { cursor: crosshair; }
 <div id="bar">
   <span id="st">连接中…</span>
   <label title="关掉后只看不控制"><input type="checkbox" id="cbCtl" checked>控制</label>
-  <button id="bSuper" title="发送 Super（Win）键">Super</button>
+  <button id="bLock" title="发送 Super+L 锁屏">锁屏</button>
   <button id="bKey" title="立即请求一个关键帧">刷新</button>
   <button id="bFull" title="全屏后可以捕获 Win、Alt+Tab 等系统键，长按 Esc 退出">全屏</button>
 </div>
@@ -209,9 +209,13 @@ cbCtl.onchange = () => {
   cv.classList.toggle('ctl', control);
   cv.focus();
 };
-document.getElementById('bSuper').onclick = () => {
-  send({ t: 'k', c: 'MetaLeft', d: 1 });
-  send({ t: 'k', c: 'MetaLeft', d: 0 });
+// 锁屏：Super+L，按下 Super → 按下 L → 松开 L → 松开 Super，每步隔一小会儿，免得合成器没来得及记住修饰键
+document.getElementById('bLock').onclick = async () => {
+  const seq = [['MetaLeft', 1], ['KeyL', 1], ['KeyL', 0], ['MetaLeft', 0]];
+  for (const [c, d] of seq) {
+    send({ t: 'k', c, d });
+    await new Promise(r => setTimeout(r, 40));
+  }
   cv.focus();
 };
 document.getElementById('bKey').onclick = () => { requestKey(); cv.focus(); };
