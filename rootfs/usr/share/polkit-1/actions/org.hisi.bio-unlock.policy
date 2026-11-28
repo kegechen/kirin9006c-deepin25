@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- hisi-bio-unlock：控制中心“手机解锁”插件经 org.hisi.BioUnlock1.User 配对新手机前要过这个认证。
+     配好的手机能解锁这个用户的会话，所以默认要输一次当前用户自己的密码（auth_self，不留缓存）；
+     不在本机桌面会话里（ssh、非活动会话）一律不行，那种情况用 sudo hisi-phone pair。
+     改名、删除自己的手机不要认证。 -->
+<policyconfig>
+  <vendor>kirin9006c-deepin25</vendor>
+
+  <action id="org.hisi.bio-unlock.pair-phone">
+    <description>Pair a phone that can unlock this computer</description>
+    <description xml:lang="zh_CN">配对用来解锁电脑的手机</description>
+    <message>Authentication is required to pair a phone that will be able to unlock your session</message>
+    <message xml:lang="zh_CN">配对后这台手机就能解锁你的电脑，需要先验证你的身份</message>
+    <icon_name>preferences-system</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

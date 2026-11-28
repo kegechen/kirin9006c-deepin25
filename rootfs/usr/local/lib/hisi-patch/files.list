@@ -19,6 +19,10 @@ unowned:/usr/local/share/wallpapers/wwp/*/*
 /usr/local/lib/hisi-treeland/*
 /usr/local/lib/hisi-wpa/*
 /usr/local/lib/hisi-bio/*
+# 控制中心“账户 → 登录方式 → 手机解锁”插件（自建文件，不归任何 deb 包）
+unowned:/usr/lib/*/dde-control-center/plugins_v1.0/phoneunlock/*
+# 配对时弹认证框用的 polkit action（deb 也会装同一路径，交给 dpkg 管，别反复报警/复活）
+unowned:/usr/share/polkit-1/actions/org.hisi.bio-unlock.policy
 /etc/systemd/system/treeland.service.d/l540-no-rt.conf
 /etc/systemd/system/treeland.service.d/l541-malibuf.conf
 /etc/systemd/system/wpa_supplicant.service.d/hisi.conf

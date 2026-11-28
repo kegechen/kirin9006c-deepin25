@@ -1,6 +1,7 @@
 # 在目标机器（deepin 25 arm64，Rootb）上编译和安装。
 #   依赖：gcc g++ make pkg-config libwayland-dev libdrm-dev libegl-dev libglvnd-core-dev libglib2.0-dev libssl-dev
-#         qt6-base-dev qt6-base-dev-tools qt6-declarative-dev（libtl-lockbio：moc、rcc、Qt6Core/DBus/Qml）
+#         qt6-base-dev qt6-base-dev-tools qt6-declarative-dev（libtl-lockbio：moc、rcc、Qt6Core/DBus/Qml；
+#         控制中心“手机解锁”插件 phoneunlock.so：Qt6Core/Gui/DBus + 系统自带的 libdde-control-center.so）
 #   顺序：sudo scripts/fetch-uos-blobs.sh <UOS 根分区>   # 先放好厂商 libmali（libmali-compat 链接时要用）
 #         make
 #         sudo make install
@@ -12,11 +13,17 @@ CXXFLAGS ?= -O2 -Wall
 QT_LIBEXEC ?= /usr/lib/qt6/libexec
 DESTDIR ?=
 MALI_DIR = /usr/local/lib/hisi-mali
+MULTIARCH ?= $(shell $(CC) -dumpmachine)
+# 控制中心（dde-control-center 6.1）插件：v1.0 格式 = <名字>.so + <名字>.qml（入口）+ <名字>Main.qml（页面）
+DCC_DIR  = /usr/lib/$(MULTIARCH)/dde-control-center/plugins_v1.0/phoneunlock
+# 装了 dde-control-center-dev 就用官方 dccfactory.h，否则用 compat/ 里二进制一致的声明
+DCC_INC  = $(firstword $(wildcard /usr/include/dde-control-center) src/dcc-phoneunlock/compat)
+DCC_QML  = $(wildcard src/dcc-phoneunlock/*.qml)
 B        = build
 
 LIBS = $(B)/libEGL_hisi_mali.so.0 $(B)/libmali-compat.so $(B)/libtl-malibuf.so \
        $(B)/libtl-norender.so $(B)/libnm-station-fix.so $(B)/libtl-lockbio.so
-BINS = $(B)/hisi-bio-unlock $(B)/hisi-phone-link
+BINS = $(B)/hisi-bio-unlock $(B)/hisi-phone-link $(B)/phoneunlock.so
 BIO_SRC = src/hisi-bio-unlock.c src/hisi-bio-phone.c src/hisi-bio-phonectl.c
 
 all: $(LIBS) $(BINS)
@@ -59,6 +66,14 @@ $(B)/libtl-lockbio.so: src/tl-lockbio.cpp $(B)/tl-lockbio.moc $(B)/lockbio.rcc
 	$(CXX) $(CXXFLAGS) -std=c++17 -shared -fPIC -fvisibility=hidden -o $@ $< -I$(B) \
 		-DHISI_LOCKBIO_RCC='"$(abspath $(B)/lockbio.rcc)"' $$(pkg-config --cflags --libs Qt6Core Qt6DBus Qt6Qml)
 
+# 控制中心“账户 → 登录方式 → 手机解锁”：经 org.hisi.BioUnlock1.User 找 hisi-bio-unlock（配对要过 polkit）
+$(B)/phoneunlock.moc: src/dcc-phoneunlock/phoneunlock.cpp | $(B)
+	$(QT_LIBEXEC)/moc -I$(DCC_INC) -o $@ $<
+
+$(B)/phoneunlock.so: src/dcc-phoneunlock/phoneunlock.cpp $(B)/phoneunlock.moc
+	$(CXX) $(CXXFLAGS) -std=c++17 -shared -fPIC -o $@ $< -I$(B) -I$(DCC_INC) \
+		$$(pkg-config --cflags --libs Qt6Core Qt6Gui Qt6DBus) -ldde-control-center
+
 # 正在被 treeland / NetworkManager 映射的 .so 不能原地覆盖：先装成临时名，再 rename 替换
 define put_so
 	install -m 755 $(1) $(DESTDIR)$(2)/.$(notdir $(1)).new
@@ -80,6 +95,9 @@ install: all
 	$(call put_so,$(B)/hisi-bio-unlock,/usr/local/lib/hisi-bio)
 	$(call put_so,$(B)/hisi-phone-link,/usr/local/lib/hisi-bio)
 	install -m 644 $(BIO_SRC) src/hisi-bio.h src/hisi-phone-link.c $(DESTDIR)/usr/local/lib/hisi-bio/
+	install -d $(DESTDIR)$(DCC_DIR)
+	$(call put_so,$(B)/phoneunlock.so,$(DCC_DIR))
+	install -m 644 $(DCC_QML) $(DESTDIR)$(DCC_DIR)/
 	cd rootfs && find . -type f ! -path './usr/local/sbin/*' ! -name apt-pre-hook ! -name wait-dpkg-idle ! -name egl-deny \
 		-exec install -D -m 644 {} $(DESTDIR)/{} \;
 	cd rootfs && find ./usr/local/sbin -type f -exec install -D -m 755 {} $(DESTDIR)/{} \;
@@ -94,6 +112,7 @@ install: all
 	  echo "  sudo systemctl enable --now hisi-strip-selinux-xattr.service   # 在 UOS 下装的系统才需要，玲珑应用要靠它"; \
 	  echo "  sudo systemctl reload dbus                            # 让 org.hisi.BioUnlock1 的策略生效（锁屏指纹 / 人脸图标）"; \
 	  echo "  sudo systemctl enable --now hisi-bio-unlock.service   # 锁屏指纹 / 人脸（已在运行就 restart）"; \
+	  echo "  systemctl --user restart org.deepin.dde.control-center.service   # 加载新的“手机解锁”插件"; \
 		  echo "  sudo systemd-sysusers && sudo systemctl reload dbus   # 建 hisi-phone 用户并让它的 D-Bus 规则生效"; \
 		  echo "  sudo systemctl enable --now hisi-phone-link.service   # 手机指纹解锁（Wi-Fi / 蓝牙）；配对：sudo hisi-phone pair"; \
 	  echo "  sudo hisi-dcc-bio-entry                               # 控制中心放出“生物认证”录入入口"; \
@@ -109,7 +128,9 @@ uninstall:
 		$(DESTDIR)$(MALI_DIR)/libtl-malibuf.so $(DESTDIR)/usr/local/lib/hisi-treeland/libtl-norender.so \
 		$(DESTDIR)/usr/local/lib/hisi-treeland/libtl-lockbio.so \
 		$(DESTDIR)/usr/local/lib/hisi-nmfix/libnm-station-fix.so $(DESTDIR)/usr/local/lib/hisi-bio/hisi-bio-unlock \
-		$(DESTDIR)/usr/local/lib/hisi-bio/hisi-phone-link
+		$(DESTDIR)/usr/local/lib/hisi-bio/hisi-phone-link \
+		$(DESTDIR)$(DCC_DIR)/phoneunlock.so $(addprefix $(DESTDIR)$(DCC_DIR)/,$(notdir $(DCC_QML)))
+	-rmdir $(DESTDIR)$(DCC_DIR)
 	cd rootfs && find . -type f ! -path './usr/local/sbin/*' ! -name apt-pre-hook ! -name wait-dpkg-idle \
 		-exec rm -f $(DESTDIR)/{} \;
 	cd rootfs && find ./usr/local/sbin -type f -exec rm -f $(DESTDIR)/{} \;
