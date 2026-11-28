@@ -36,7 +36,12 @@ CUSTOM_META=$META/boot-custom.meta     # uuid= / path= / sha256=
 LOG=/var/log/hisi-patch-check.log
 LOCK=/run/lock/hisi-patch.lock
 BACKUP_ROOT=/var/backups/hisi-patch
-WLROOTS_LIB=/usr/lib/aarch64-linux-gnu/libwaylib-wlroots.so.0.20
+# multiarch 三元组按机器架构选（arm64 → aarch64-linux-gnu，amd64 → x86_64-linux-gnu）
+case "$(dpkg --print-architecture 2>/dev/null || uname -m)" in
+    amd64|x86_64) MULTIARCH=x86_64-linux-gnu ;;
+    *)            MULTIARCH=aarch64-linux-gnu ;;
+esac
+WLROOTS_LIB=/usr/lib/$MULTIARCH/libwaylib-wlroots.so.0.20
 WLROOTS_REAL=libwaylib-wlroots.so.0.20.2   # tl-malibuf 按此版本的结构布局编写
 WL_SYMS="wlr_allocator_autocreate wlr_drm_create wlr_buffer_init wlr_buffer_finish wlr_buffer_drop wlr_buffer_register_resource_interface wlr_dmabuf_attributes_finish wlr_backend_get_drm_fd wlr_renderer_get_drm_fd"
 WALLPAPER_TOOL=/usr/local/sbin/hisi-wallpaper-reencode
@@ -44,8 +49,8 @@ DCC_BIO_TOOL=/usr/local/sbin/hisi-dcc-bio-entry
 # 锁屏指纹 / 人脸界面（libtl-lockbio.so）：只认 lockbio.known 里列出的锁屏插件，画图标要 QtQuick.Shapes
 LOCKBIO_SO=/usr/local/lib/hisi-treeland/libtl-lockbio.so
 LOCKBIO_KNOWN=/usr/local/lib/hisi-treeland/lockbio.known
-LOCKSCREEN_SO=/usr/lib/aarch64-linux-gnu/treeland/plugins/liblockscreen.so
-QML_SHAPES=/usr/lib/aarch64-linux-gnu/qt6/qml/QtQuick/Shapes/qmldir
+LOCKSCREEN_SO=/usr/lib/$MULTIARCH/treeland/plugins/liblockscreen.so
+QML_SHAPES=/usr/lib/$MULTIARCH/qt6/qml/QtQuick/Shapes/qmldir
 LOCKBIO_GUARD=.hisi-lockbio-starting   # 在 greeter 用户 dde 的家目录里，treeland 启动 60 秒后自动删
 # 桌面用户（用户级 systemd 检查、桌面通知）：默认 uid 1000，可用 HISI_DESKTOP_UID 覆盖
 DESKTOP_UID=${HISI_DESKTOP_UID:-1000}

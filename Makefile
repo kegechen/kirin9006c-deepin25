@@ -13,6 +13,10 @@ CXXFLAGS ?= -O2 -Wall
 QT_LIBEXEC ?= /usr/lib/qt6/libexec
 DESTDIR ?=
 MALI_DIR = /usr/local/lib/hisi-mali
+# 链接 libmali-compat 用的 libmali.so.0 目录，默认同 MALI_DIR（厂商 blob）。
+# 打 deb（scripts/build-deb.sh）在没有厂商 blob 的环境里会把它指向一个两符号的桩：
+# 产物的 NEEDED/符号表与真实构建一致，运行时符号仍由 LD_PRELOAD 的厂商 libmali.so.0 提供。
+MALI_LINK_DIR ?= $(MALI_DIR)
 MULTIARCH ?= $(shell $(CC) -dumpmachine)
 # 控制中心（dde-control-center 6.1）插件：v1.0 格式 = <名字>.so + <名字>.qml（入口）+ <名字>Main.qml（页面）
 DCC_DIR  = /usr/lib/$(MULTIARCH)/dde-control-center/plugins_v1.0/phoneunlock
@@ -36,8 +40,8 @@ $(B)/libEGL_hisi_mali.so.0: src/hisi-mali-egl.c | $(B)
 		-Wl,-soname,libEGL_hisi_mali.so.0 -lwayland-client -ldl -lpthread
 
 $(B)/libmali-compat.so: src/mali-compat.c | $(B)
-	@test -e $(MALI_DIR)/libmali.so.0 || { echo "缺少 $(MALI_DIR)/libmali.so.0：先运行 sudo scripts/fetch-uos-blobs.sh"; exit 1; }
-	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< -L$(MALI_DIR) -l:libmali.so.0 -lwayland-client -ldl
+	@test -e $(MALI_LINK_DIR)/libmali.so.0 || { echo "缺少 $(MALI_LINK_DIR)/libmali.so.0：先运行 sudo scripts/fetch-uos-blobs.sh"; exit 1; }
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< -L$(MALI_LINK_DIR) -l:libmali.so.0 -lwayland-client -ldl
 
 $(B)/libtl-malibuf.so: src/tl-malibuf.c | $(B)
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< $$(pkg-config --cflags --libs libdrm wayland-server) -ldl
@@ -64,7 +68,8 @@ $(B)/tl-lockbio.moc: src/tl-lockbio.cpp | $(B)
 
 $(B)/libtl-lockbio.so: src/tl-lockbio.cpp $(B)/tl-lockbio.moc $(B)/lockbio.rcc
 	$(CXX) $(CXXFLAGS) -std=c++17 -shared -fPIC -fvisibility=hidden -o $@ $< -I$(B) \
-		-DHISI_LOCKBIO_RCC='"$(abspath $(B)/lockbio.rcc)"' $$(pkg-config --cflags --libs Qt6Core Qt6DBus Qt6Qml)
+		-DHISI_LOCKBIO_RCC='"$(abspath $(B)/lockbio.rcc)"' \
+		-DHISI_MULTIARCH='"$(MULTIARCH)"' $$(pkg-config --cflags --libs Qt6Core Qt6DBus Qt6Qml)
 
 # 控制中心“账户 → 登录方式 → 手机解锁”：经 org.hisi.BioUnlock1.User 找 hisi-bio-unlock（配对要过 polkit）
 $(B)/phoneunlock.moc: src/dcc-phoneunlock/phoneunlock.cpp | $(B)

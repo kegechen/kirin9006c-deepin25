@@ -40,10 +40,15 @@
 #include <unistd.h>
 
 #define TREELAND_EXE  "/usr/bin/treeland"
-#define LOCKSCREEN_SO "/usr/lib/aarch64-linux-gnu/treeland/plugins/liblockscreen.so"
 #define KNOWN_LIST    "/usr/local/lib/hisi-treeland/lockbio.known"
 #define GUARD_NAME    ".hisi-lockbio-starting"
 #define GUARD_SECS    60
+
+/* multiarch 三元组由 Makefile 传入（aarch64-linux-gnu / x86_64-linux-gnu） */
+#ifndef HISI_MULTIARCH
+#error "需要 -DHISI_MULTIARCH=\"<multiarch>\"（见 Makefile）"
+#endif
+#define LOCKSCREEN_SO "/usr/lib/" HISI_MULTIARCH "/treeland/plugins/liblockscreen.so"
 
 #define BIO_SVC   "org.hisi.BioUnlock1"
 #define BIO_PATH  "/org/hisi/BioUnlock1"

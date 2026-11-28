@@ -16,7 +16,10 @@
 import os
 import sys
 
-LIB = "/usr/lib/aarch64-linux-gnu/dde-control-center/plugins_v1.1/authentication/libauthentication_qml.so"
+# multiarch 三元组按机器架构选（aarch64-linux-gnu / x86_64-linux-gnu）
+MULTIARCH = {"aarch64": "aarch64-linux-gnu", "x86_64": "x86_64-linux-gnu"}.get(os.uname().machine)
+LIB = (f"/usr/lib/{MULTIARCH}/dde-control-center/plugins_v1.1/authentication/libauthentication_qml.so"
+       if MULTIARCH else None)
 SRC_ORIG = b"visible: (hasFingerprint || hasChara) && !DccApp.isTreeland()"
 SRC_PATCHED = b"visible: (hasFingerprint || hasChara) && ~DccApp.isTreeland()"
 MAGIC, MAGIC_OFF = b"qv4cdata", b"qv4cdatX"
@@ -71,8 +74,8 @@ def main():
     if mode not in ("", "--check", "--undo"):
         print("用法：hisi-dcc-bio-entry [--check | --undo]")
         return 64
-    if not os.path.isfile(LIB):
-        print(f"控制中心认证插件不存在（{LIB}）")
+    if not LIB or not os.path.isfile(LIB):
+        print(f"控制中心认证插件不存在（{LIB or '未知架构'}）")
         return 3
     d = bytearray(open(LIB, "rb").read())
     s, msg = state(d)
