@@ -1,0 +1,24 @@
+# kirin9006c-deepin25 / tl-lockbio：盖掉 liblockscreen.so（treeland 0.11.0）里的 :/qt/qml/LockScreen/qmldir。
+# 跟原文件逐行相同，只把 UserInput 换成带指纹 / 人脸入口的 qml/UserInputHisi.qml；其余组件照旧用插件里 AOT 编译好的。
+# 只在插件 sha256 列在 lockbio.known 里时才登记，所以这份清单总是对应插件的同一版本。
+module LockScreen
+linktarget lockscreenplugin
+optional plugin lockscreenplugin
+classname LockScreenPlugin
+typeinfo lockscreen.qmltypes
+prefer :/qt/qml/LockScreen/
+HintLabel 254.0 qml/HintLabel.qml
+LoginAnimation 254.0 qml/LoginAnimation.qml
+QuickAction 254.0 qml/QuickAction.qml
+SessionList 254.0 qml/SessionList.qml
+ShutdownView 254.0 qml/ShutdownView.qml
+UserInput 254.0 qml/UserInputHisi.qml
+ControlAction 254.0 qml/ControlAction.qml
+Greeter 254.0 qml/Greeter.qml
+LockView 254.0 qml/LockView.qml
+LoginView 254.0 qml/LoginView.qml
+PowerList 254.0 qml/PowerList.qml
+RoundBlur 254.0 qml/RoundBlur.qml
+ShutdownButton 254.0 qml/ShutdownButton.qml
+TimeDateWidget 254.0 qml/TimeDateWidget.qml
+UserList 254.0 qml/UserList.qml

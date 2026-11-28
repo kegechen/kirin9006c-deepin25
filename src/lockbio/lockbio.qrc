@@ -1,0 +1,8 @@
+<!DOCTYPE RCC>
+<!-- 编进 libtl-lockbio.so（rcc 二进制格式 + .incbin，见 Makefile），由它在 treeland 加载锁屏插件之前登记 -->
+<RCC version="1.0">
+    <qresource prefix="/qt/qml/LockScreen">
+        <file>qmldir</file>
+        <file alias="qml/UserInputHisi.qml">UserInputHisi.qml</file>
+    </qresource>
+</RCC>

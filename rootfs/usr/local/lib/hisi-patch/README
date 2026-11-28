@@ -3,7 +3,8 @@ hisi-patch-check —— 擎云 L540（麒麟9006C）deepin25-on-Rootb 本地补�
 
 这台机器的 deepin 25 用户态（Rootb 分区）靠一批本地补丁才能正常使用：
 Wi-Fi/NetworkManager 垫片（hisi-nmfix）、厂商 libmali GPU + glvnd EGL 垫片（hisi-mali）、
-treeland 合成器适配（libtl-malibuf / libtl-norender / drop-in）、wpa_supplicant 2.9+hisi、
+treeland 合成器适配（libtl-malibuf / libtl-norender / drop-in）、锁屏指纹 / 人脸（hisi-bio-unlock、
+libtl-lockbio）、手机指纹解锁（hisi-phone-link）、wpa_supplicant 2.9+hisi、
 蓝牙 hciattach-hisi、elfverify 绕过 init（d25-init）、UOS Boot 分区 grub 引导入口、
 ddm 登录卡死看门狗（hisi-ddm-watchdog）、box64 x86_64 模拟、指纹守护链接、动态壁纸重编码等。
 apt 升级或误操作可能覆盖它们。本工具定期把现场与“黄金副本”逐个比对，发现改动可以一键恢复。
@@ -61,6 +62,13 @@ files.list、fstab 受保护行的规则是按作者机器写的（/data bind �
     只提示手工恢复来源；binfmt 注册丢失时可自动执行 systemctl restart systemd-binfmt。
   - 动态壁纸：调用 hisi-wallpaper-reencode 自带的 --check（只读）；恢复需手工运行
     sudo hisi-wallpaper-reencode（重编码耗时数分钟，本工具不会在 apt 钩子里同步执行）。
+  - 控制中心“生物认证”入口：插件 libauthentication_qml.so 属于 dde-control-center 包，不进 golden
+    （包升级后拿旧副本盖回去会和新版控制中心不配套），改为调用 hisi-dcc-bio-entry --check；
+    升级覆盖后报“改动”，--fix 时在新插件上重打（等长改两处字节，可 hisi-dcc-bio-entry --undo 还原）。
+  - 锁屏指纹 / 人脸界面（libtl-lockbio.so）：treeland 升级后锁屏插件 sha256 不在 lockbio.known、
+    缺 qml6-module-qtquick-shapes、或崩溃保护标记（/var/lib/ddm/.hisi-lockbio-starting）残留时，
+    它会自行停用、锁屏退回只有密码框，这里只报“警告”；处理办法写在警告里。
+  - 恢复了 /etc/dbus-1/system.d/ 下的策略文件时，--fix 会顺带 systemctl reload dbus（只重读配置）。
 
 如何添加/修改跟踪条目：
   1. 编辑 files.list 加一行（路径或 glob；目录下全部文件用 dir/*；只检测加 noauto: 前缀）。

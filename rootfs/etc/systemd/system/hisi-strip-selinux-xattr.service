@@ -1,0 +1,16 @@
+[Unit]
+Description=清除 UOS 装机时留在 deepin 根分区上的 security.selinux 标签（否则玲珑应用全部起不来）
+# install-deepin25.sh 装机时 enable，首次开机跑一次，跑完写标记文件，以后什么都不做。
+# 个别文件清不掉（比如 chattr +i）也写标记：重跑同样清不掉，没必要每次开机都扫一遍；明细看 journalctl -u 本服务。
+ConditionPathExists=!/var/lib/hisi-strip-selinux-xattr.done
+After=local-fs.target
+# 玲珑包管理器多是按需（D-Bus）拉起，排在本服务后面：首次开机清完之前打开的玲珑应用会等它清完，而不是直接失败
+Before=org.deepin.linglong.PackageManager.service
+
+[Service]
+Type=oneshot
+ExecStart=-/usr/local/sbin/hisi-strip-selinux-xattr /
+ExecStartPost=/usr/bin/touch /var/lib/hisi-strip-selinux-xattr.done
+
+[Install]
+WantedBy=multi-user.target

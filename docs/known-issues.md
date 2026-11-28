@@ -38,12 +38,38 @@ systemctl --user start dde-shell@DDE.service
 
 `sudo systemctl restart treeland` 是安全的：会回到锁屏，大部分会话进程会保留。重启后建议确认 ddm 没有卡在 `pipe_read`（见上文）。
 
-## 指纹
+## 指纹 / 人脸
 
-汇顶 HC460，走 SPI + TEE，不经过 fprintd/libfprint。需要从 UOS 复制 `/vendor`、`/usr/lib` 下的厂商库（`libfingerprint.so`、`libhwFingerprint.so`、`libteec.so*` 等）以及 `hwfp_init.sh`、`hwfp_init.service`、`teecd.service`，补一个 `/usr/bin/fingerprint_daemon` 符号链接（指向 `/vendor/bin/hw/vendor.huawei.hardware.biometrics.fingerprint@2.1-service`），再 enable `hwfp_init.service`。本仓库没有把这一步自动化。
+指纹是汇顶 HC460，走 SPI + TEE，不经过 fprintd/libfprint。需要从 UOS 复制 `/vendor`、`/usr/lib` 下的厂商库（`libfingerprint.so`、`libhwFingerprint.so`、`libteec.so*` 等）以及 `hwfp_init.sh`、`hwfp_init.service`、`teecd.service`，补一个 `/usr/bin/fingerprint_daemon` 符号链接（指向 `/vendor/bin/hw/vendor.huawei.hardware.biometrics.fingerprint@2.1-service`），再 enable `hwfp_init.service`（一键装机脚本会照 UOS 的启用状态做）。人脸用 deepin 自带的 `deepin-face`（按需由 D-Bus 拉起，用普通摄像头）。
 
-- 能识别后，sudo 和 polkit 可以用指纹；**锁屏和登录界面不行**：ddm + treeland 的 greeter 不接 `Authenticate1`，只能输密码。
+- **录入入口**：控制中心“账户 → 登录方式 → 生物认证”。dde-control-center 在 treeland 会话里把它写死藏掉了（`!DccApp.isTreeland()`），`hisi-dcc-bio-entry` 在插件上改两个字节放出来；dde-control-center 升级会覆盖，`hisi-patch-check` 报“改动”，`--fix` 重打。
+- **锁屏**：treeland 0.11 锁屏只有密码框，ddm 拿到密码一次性走 PAM，`Authenticate1` 的生物识别轮不到。`hisi-bio-unlock.service` 在后台补上：监听 logind 的 Lock，用 `Authenticate1` 建认证 session，指纹一直等待；人脸只在锁屏 2 秒后有键盘 / 触控板动作、开盖或唤醒时开，每次最多 15 秒（避免手动锁屏后人还在跟前就被立刻解开）；认证通过后调 logind `UnlockSession`，treeland 随即收起锁屏。用密码解锁时释放传感器和摄像头，并清零失败次数。
+  - **锁屏界面**：`libtl-lockbio.so`（预加载进 treeland，不改 treeland 的包文件）在密码框下面加了指纹 / 人脸图标和提示，类似手机：指纹图标呼吸表示在等，按上去就验证；人脸在识别时提示“正在识别人脸”，没开或没通过时点人脸图标再识别一次（最多 15 秒）；不匹配图标变红并晃一下，通过变绿后锁屏收起；连错被锁时图标变灰，提示改用密码。密码框照常可用。只显示该用户录入过的类型，都没录入就和原来一样只有密码框。
+    - 做法：Qt 资源按登记先后查找，它在 treeland 加载锁屏插件之前登记一份 `LockScreen` 模块清单（`src/lockbio/qmldir`），把 `UserInput` 换成 `src/lockbio/UserInputHisi.qml`（照 treeland 0.11.0 的 `UserInput.qml` 改），其余组件照旧用插件自带的。状态来自 `hisi-bio-unlock` 在 system bus 上的 `org.hisi.BioUnlock1`（`GetState` / `StateChanged` / `StartFace`，策略只放行 root 和 greeter 用户 dde）；认证和解锁仍在 `hisi-bio-unlock` 里做，界面只负责显示和“点人脸”。
+    - 自我保护：锁屏插件 `liblockscreen.so` 的 sha256 不在 `/usr/local/lib/hisi-treeland/lockbio.known` 里（treeland 升级了）、缺 `qml6-module-qtquick-shapes`、或上一次 treeland 启动没撑过 60 秒（标记文件 `/var/lib/ddm/.hisi-lockbio-starting`）时都不启用，锁屏退回只有密码框，后台指纹 / 人脸解锁照常；`hisi-patch-check` 会给出警告。treeland 升级后：对照新版 `UserInput.qml` 复核 `UserInputHisi.qml` 和 `qmldir`，再把新 sha256 加进 `lockbio.known`。临时关掉：treeland 的 drop-in 里加 `Environment=HISI_LOCKBIO_DISABLE=1`。
+    - 已用测试构建（`-DHISI_BIO_SELFTEST` 多一个 `DebugSetState` 方法）在真机上逐个截图核对过各状态的图标和提示，点人脸图标能调到 `StartFace`，密码解锁不受影响。
+    - `systemctl restart treeland`（或 treeland 崩溃重启）之后直接出现的锁屏不经过 logind 的 Lock，`hisi-bio-unlock` 不知道已经锁屏，这一次只能输密码；正常锁屏（快捷键、合盖、空闲）都会走 logind，不受影响。
+  - 只用该用户在 deepin 里录入过的类型（服务端按录入情况决定，读 session 的 `FactorsInfo`）；没录入时什么都不做，录入后下一次锁屏就生效，不用重启服务。日志：`journalctl -u hisi-bio-unlock`。
+  - 指纹 / 人脸各自连错 3 次被锁，要用一次密码。
+  - “认证通过 → 解锁”这条路已用密码因子自测过（`-DHISI_BIO_SELFTEST` 编译）；真实指纹 / 人脸解锁要录入之后再实测。
+- **登录界面**（开机 / 注销后）仍只能输密码。
+- sudo 和 polkit 走 `pam_deepin_authentication`，可以用指纹。
 - UOS 和 deepin 共用 TEE 里的指纹存储，在一边重新录入会影响另一边，动手前先备份。
+
+## 手机指纹解锁
+
+设计和协议见 [phone-unlock.md](phone-unlock.md)。配对：电脑上 `sudo hisi-phone pair`，手机 App 扫码（没装 qrencode 时把打印的链接发到手机，在 App 里粘贴）。
+
+- **Wi‑Fi 要和电脑在同一网段**，路由器 / 热点不能开 AP 隔离；不在同一网段就走蓝牙。手机 App 也能手填额外地址（调试时配合 `adb reverse` 用 `127.0.0.1`）。
+- 蓝牙：电脑一直以 BLE 外设广播（BlueZ 5.85，`hisi-phone-link` 通过 D-Bus 注册 GATT 服务和广播，不需要手机和电脑先“配对蓝牙”）。蓝牙关着时只剩 Wi‑Fi，打开后自动重新注册。
+  - 5.4 内核的扩展广播有毛病：每次只播一段时间（默认 2 秒，这里设 60 秒）且到期不重开，“停止全部广播”控制器又不认。`hisi-phone-link` 掐着到期时刻注销再注册续上；刚重启服务时上一个进程的广播还在播，前一分钟内 bluetoothd 日志里会有一串 `Failed to add advertisement: Busy (0x0a)`，是正常的等待。
+  - 同样因为内核，空中的广播不带服务 UUID、间隔固定 1.28 秒：手机只能按二维码里的蓝牙地址直连（不影响使用），连上要 1～6 秒，比 Wi‑Fi 慢。
+- 只在该用户有本地图形会话时能解锁；锁屏截图只在 `hisi-bio-unlock` 确认已锁屏时给（和指纹 / 人脸一样，`systemctl restart treeland` 之后那次锁屏它不知道，App 上看不到截图，但仍可尝试解锁）。
+- 手机上新录入或删除指纹后，Keystore 里的密钥会失效，要重新配对；`sudo hisi-phone list` / `unpair <ID>` 管理已配对的手机。
+- 已用 `tools/phone-unlock-test.py`（软件密钥扮演 App）在真机上走通 Wi‑Fi：配对 → HELLO → 锁屏截图 → 错签名被拒 → 正确签名解锁。日志：`journalctl -u hisi-bio-unlock -u hisi-phone-link`。
+- 不用手机解锁：`sudo systemctl disable --now hisi-phone-link`（停掉 47390 端口和蓝牙广播）。
+- App 的解锁界面有 **一键锁屏**（不验指纹，方便测试）；长按电脑卡片还能开 **离开自动锁屏**：手机 App 用蓝牙保持连接，手机走远、蓝牙断开后电脑等 15 秒～5 分钟自动锁屏（Windows 动态锁那种），期间连回来就不锁；只会锁不会解锁。关掉开关时会先通知电脑再断开，不会误锁。
+- 离开自动锁屏开着时不要随手用 `adb install -r` 更新 App：华为的启动管理默认拦侧载 App 自启动，更新会把服务杀掉且收不到 `MY_PACKAGE_REPLACED`，电脑就按“手机离开”锁屏了。要先关掉开关再装；华为 / 荣耀要在 设置 → 应用 → 应用启动管理 里把 App 改成手动管理、全部允许。
 
 ## 声音
 
@@ -78,6 +104,25 @@ systemctl --user start dde-shell@DDE.service
 - Hi1103 对 `NL80211_CMD_GET_STATION + NLM_F_DUMP` 不会结束（`iw station dump` 3 秒刷出 57 万条），NM 1.44 主线程会 100% CPU，`nmcli` 显示“未运行”，控制中心卡死。`libnm-station-fix.so` 把它改成带 BSSID 的单次查询。
 - `nmcli device reapply wlan0` 会因为 `802-11-wireless.powersave` 属性报错，改 DNS 后用 `resolvectl dns wlan0 ...` 临时生效即可。
 - 热点“能 ping 通 IP、域名解析失败”通常是 Windows ICS 的 DNS 代理不响应：只开关热点没用，要管理员 `Restart-Service SharedAccess -Force` 再开热点；或者在 ARM 端用固定 DNS（见 `examples/`）。
+
+## 玲珑应用（记事本、相机、计算器等）一打开就退出
+
+deepin 25 的记事本、相机、计算器、日历、看图、影院等都是玲珑包，同时坏掉；deb 装的软件（比如微信）不受影响。`ll-cli run org.deepin.editor` 只报 `Error -1: InitRunContext failed`，journal 里是：
+
+```
+ll-package-manager: failed to remove /tmp/linglong-runtime-991/linglong/<容器ID>.init/rootfs/etc/localtime: 不允许的操作
+ll-package-manager: init run context failed: ... failed to create symlink .../rootfs/etc/localtime -> /usr/share/zoneinfo/...: 文件已存在
+```
+
+原因是一键装机在 UOS 下运行，而 UOS 开着 SELinux，解包和 chroot 里写到新分区的文件都被打上 `security.selinux="root:object_r:unlabeled_t:s0"`（`ls -l` 权限位后面多一个 `.`）。deepin 不加载 SELinux（LSM 只有 `capability,elfverify,apparmor,uosmanager`），这时内核 `cap_inode_setxattr` 要求有 `CAP_SYS_ADMIN` 才能写 `security.*` 属性。5.4 内核不能在用户命名空间里挂内核 overlay（linglong 要求 ≥ 5.11），于是退回 fuse-overlayfs；`ll-package-manager` 以普通服务账号删除 base 层的 `etc/localtime` 前要把 `etc` 目录 copy-up，连同这个属性一起复制，失败就是 EPERM。
+
+处理：`hisi-strip-selinux-xattr` 只在根分区内清除 `security.selinux`，不跨挂载点（`/home` 在 `/data` 上、和 UOS 共用，不会碰到）。一键装机会 enable `hisi-strip-selinux-xattr.service`，deepin 首次开机时跑一次。之前装的系统、手工装的系统执行一次：
+
+```sh
+sudo hisi-strip-selinux-xattr /          # 约 28 万个文件，十几秒；加 -n 只统计
+```
+
+不用重启，直接重新打开应用即可。这一步不能放在 UOS 下做：SELinux 加载着时，内核不允许删除 `security.selinux`，permissive 也不行。玲珑仓库是 `bare-user-only` 模式，xattr 不参与校验和，清掉不影响 `ll-cli` 的校验和升级。
 
 ## 内核和 grub
 

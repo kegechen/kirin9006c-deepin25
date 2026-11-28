@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>L540 远程查看</title>
+<style>
+html, body { margin: 0; height: 100%; background: #111; color: #ddd; overflow: hidden;
+  font: 13px system-ui, "Microsoft YaHei", sans-serif; }
+#stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+canvas { display: block; outline: none; background: #000; }
+canvas.ctl { cursor: crosshair; }
+#bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 10;
+  display: flex; gap: 6px; align-items: center; padding: 4px 10px;
+  background: rgba(32, 32, 32, .88); border-radius: 0 0 8px 8px; transition: transform .2s; }
+#bar.hide { transform: translate(-50%, -100%); }
+#bar button { background: #3a3a3a; color: #eee; border: 1px solid #555; border-radius: 4px;
+  padding: 2px 8px; font: inherit; cursor: pointer; }
+#bar button:hover { background: #4a4a4a; }
+#bar label { display: flex; align-items: center; gap: 3px; cursor: pointer; }
+#st { min-width: 210px; font-variant-numeric: tabular-nums; }
+#msg { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 9;
+  max-width: 560px; padding: 14px 18px; background: rgba(40, 40, 40, .95); border-radius: 8px;
+  line-height: 1.6; display: none; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv" tabindex="0" class="ctl"></canvas></div>
+<div id="bar">
+  <span id="st">连接中…</span>
+  <label title="关掉后只看不控制"><input type="checkbox" id="cbCtl" checked>控制</label>
+  <button id="bSuper" title="发送 Super（Win）键">Super</button>
+  <button id="bKey" title="立即请求一个关键帧">刷新</button>
+  <button id="bFull" title="全屏后可以捕获 Win、Alt+Tab 等系统键，长按 Esc 退出">全屏</button>
+</div>
+<div id="msg"></div>
+<script>
+'use strict';
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d', { alpha: false, desynchronized: true });
+const st = document.getElementById('st'), msgEl = document.getElementById('msg');
+const bar = document.getElementById('bar'), cbCtl = document.getElementById('cbCtl');
+
+let ws = null, dec = null, cfg = null, waitKey = true, ts = 0, retryTimer = null;
+let pendingFrame = null, rafPending = false;
+let nFrames = 0, nBytes = 0, lastFrameAt = 0;
+let control = true;
+const keysDown = new Set(), btnsDown = new Set();
+
+function showMsg(t) { msgEl.textContent = t; msgEl.style.display = t ? 'block' : 'none'; }
+
+if (!('VideoDecoder' in window)) {
+  showMsg('这个页面需要 WebCodecs：请用 Chrome 或 Edge，并且通过 http://localhost 打开（SSH 隧道）。' +
+          '直接用局域网 IP 打开时浏览器不提供 WebCodecs。');
+  throw new Error('no WebCodecs');
+}
+
+// 画布按比例铺满窗口
+function layout() {
+  if (!cfg) return;
+  const s = Math.min(innerWidth / cfg.w, innerHeight / cfg.h);
+  cv.style.width = Math.floor(cfg.w * s) + 'px';
+  cv.style.height = Math.floor(cfg.h * s) + 'px';
+}
+addEventListener('resize', layout);
+
+// 解码与绘制：只保留最新一帧，在下一次 rAF 画
+function draw() {
+  rafPending = false;
+  if (!pendingFrame) return;
+  ctx.drawImage(pendingFrame, 0, 0, cv.width, cv.height);
+  pendingFrame.close();
+  pendingFrame = null;
+}
+function onFrame(f) {
+  if (pendingFrame) pendingFrame.close();
+  pendingFrame = f;
+  nFrames++;
+  lastFrameAt = performance.now();
+  if (!rafPending) { rafPending = true; requestAnimationFrame(draw); }
+}
+function newDecoder() {
+  if (dec && dec.state !== 'closed') { try { dec.close(); } catch (e) {} }
+  dec = new VideoDecoder({
+    output: onFrame,
+    error: e => { console.warn('解码出错', e); setTimeout(() => { newDecoder(); requestKey(); }, 100); },
+  });
+  dec.configure({ codec: cfg.codec, codedWidth: cfg.w, codedHeight: cfg.h, optimizeForLatency: true });
+  waitKey = true;
+}
+function requestKey() {
+  waitKey = true;
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send('{"t":"kf"}');
+}
+
+// WebSocket
+function connect() {
+  clearTimeout(retryTimer);
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
+  st.textContent = '连接中…';
+  ws.onmessage = ev => {
+    if (typeof ev.data === 'string') {
+      const m = JSON.parse(ev.data);
+      if (m.type === 'config') {
+        cfg = m;
+        cv.width = m.w; cv.height = m.h;
+        layout();
+        newDecoder();
+        showMsg('');
+      } else if (m.type === 'notice') {
+        showMsg(m.msg);
+        if (!m.sticky) setTimeout(() => showMsg(''), 4000); // sticky 的一直显示到画面出来
+      }
+      return;
+    }
+    if (!dec || dec.state !== 'configured') return;
+    const u8 = new Uint8Array(ev.data);
+    const key = (u8[0] & 1) === 1;
+    nBytes += u8.length;
+    if (waitKey && !key) return;
+    if (dec.decodeQueueSize > 20) { requestKey(); return; } // 解码跟不上：丢到下一个关键帧
+    waitKey = false;
+    dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: (ts++) * 1000, data: u8.subarray(1) }));
+  };
+  ws.onclose = ev => {
+    releaseAll();
+    if (ev.reason === 'replaced') {
+      st.textContent = '已断开';
+      showMsg('已经在另一个窗口打开，这个窗口断开了。刷新页面可以抢回来。');
+      return;
+    }
+    st.textContent = '已断开，3 秒后重连…';
+    retryTimer = setTimeout(connect, 3000);
+  };
+}
+function send(o) {
+  if (control && ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o));
+}
+
+setInterval(() => {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !cfg) return;
+  const idle = performance.now() - lastFrameAt > 1500;
+  st.textContent = `${cfg.w}×${cfg.h}　${idle ? '画面静止' : nFrames + ' 帧/秒'}　${(nBytes * 8 / 1000).toFixed(0)} kbps`;
+  nFrames = 0; nBytes = 0;
+}, 1000);
+
+// 鼠标
+function pos(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+           y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) };
+}
+function inCanvas(e) {
+  const r = cv.getBoundingClientRect();
+  return e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
+}
+addEventListener('mousemove', e => {
+  if (document.fullscreenElement) {
+    if (e.clientY < 4) bar.classList.remove('hide');
+  }
+  if (btnsDown.size || inCanvas(e)) send({ t: 'm', ...pos(e) });
+});
+cv.addEventListener('mousedown', e => {
+  cv.focus();
+  e.preventDefault();
+  btnsDown.add(e.button);
+  send({ t: 'm', ...pos(e) });
+  send({ t: 'b', b: e.button, d: 1 });
+});
+addEventListener('mouseup', e => {
+  if (!btnsDown.has(e.button)) return;
+  btnsDown.delete(e.button);
+  send({ t: 'm', ...pos(e) });
+  send({ t: 'b', b: e.button, d: 0 });
+});
+cv.addEventListener('contextmenu', e => e.preventDefault());
+cv.addEventListener('auxclick', e => e.preventDefault());
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  // 换算成高精度滚轮单位（120 = 一格）；Chrome/Edge 一格约 100 像素
+  const k = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 360 : 1.2;
+  send({ t: 'w', v: Math.round(-e.deltaY * k), h: Math.round(e.deltaX * k) });
+}, { passive: false });
+
+// 键盘：按物理键位（code）发送，输入法由远端处理
+function onKey(e, down) {
+  if (!control || document.activeElement !== cv) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (down && e.repeat) return; // 自动重复交给远端
+  if (!e.code) return;
+  if (down) keysDown.add(e.code); else keysDown.delete(e.code);
+  send({ t: 'k', c: e.code, d: down ? 1 : 0 });
+}
+addEventListener('keydown', e => onKey(e, true), true);
+addEventListener('keyup', e => onKey(e, false), true);
+
+function releaseAll() {
+  if (keysDown.size || btnsDown.size) send({ t: 'release' });
+  keysDown.clear(); btnsDown.clear();
+}
+addEventListener('blur', releaseAll);
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
+
+// 工具栏
+cbCtl.onchange = () => {
+  if (!cbCtl.checked) releaseAll();
+  control = cbCtl.checked;
+  cv.classList.toggle('ctl', control);
+  cv.focus();
+};
+document.getElementById('bSuper').onclick = () => {
+  send({ t: 'k', c: 'MetaLeft', d: 1 });
+  send({ t: 'k', c: 'MetaLeft', d: 0 });
+  cv.focus();
+};
+document.getElementById('bKey').onclick = () => { requestKey(); cv.focus(); };
+document.getElementById('bFull').onclick = async () => {
+  if (document.fullscreenElement) {
+    await document.exitFullscreen();
+  } else {
+    await document.documentElement.requestFullscreen();
+    if (navigator.keyboard && navigator.keyboard.lock) navigator.keyboard.lock().catch(() => {});
+  }
+  cv.focus();
+};
+document.addEventListener('fullscreenchange', () => {
+  bar.classList.toggle('hide', !!document.fullscreenElement);
+  if (!document.fullscreenElement && navigator.keyboard && navigator.keyboard.unlock) navigator.keyboard.unlock();
+});
+bar.addEventListener('mouseleave', () => { if (document.fullscreenElement) bar.classList.add('hide'); });
+
+connect();
+cv.focus();
+</script>
+</body>
+</html>

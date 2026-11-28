@@ -1,0 +1,5 @@
+# libtl-lockbio.so 只在锁屏插件是下面这些版本时才启用（src/lockbio/UserInputHisi.qml 是照着它们的 UserInput.qml 改的）。
+# treeland 升级后：把新插件里的 qml/UserInput.qml、qml/LockView.qml 和 qmldir 跟旧版比一下，
+# 没变就把新的 sha256 加在下面，变了就先改 UserInputHisi.qml。不认识的版本只是不显示图标，后台指纹 / 人脸照常。
+# sha256  /usr/lib/aarch64-linux-gnu/treeland/plugins/liblockscreen.so  （版本）
+0c0c46d62317d46b07c9dbbe3e8d2f73f8aadd7d70d9d129be6255f9b84e8692  treeland 0.11.0

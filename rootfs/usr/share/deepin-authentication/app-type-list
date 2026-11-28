@@ -1,0 +1,15 @@
+{
+    "app-type":[
+        {"app":"/usr/sbin/lightdm","type":"login"},
+        {"app":"/usr/bin/lightdm-deepin-greeter","type":"login"},
+        {"app":"/usr/bin/dde-lock","type":"lock"},
+        {"app":"/usr/lib/policykit-1/polkit-agent-helper-1","type":"authorization"},
+        {"app":"/usr/bin/sudo","type":"authorization"},
+        {"app":"/usr/bin/su","type":"authorization"},
+        {"app":"/usr/bin/login","type":"login"},
+        {"app":"/usr/sbin/sshd","type":"login"},
+        {"app":"/usr/lib/openssh/sshd-session","type":"login"},
+        {"app":"/usr/bin/ddm","type":"login"},
+        {"app":"/usr/bin/treeland","type":"lock"}
+    ]
+}

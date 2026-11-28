@@ -1,0 +1,7 @@
+#!/bin/sh
+# 手机指纹解锁的配对与管理（root）：
+#   sudo hisi-phone pair [用户名]   显示配对二维码，手机“电脑解锁”App 扫码
+#   sudo hisi-phone list            列出已配对的手机
+#   sudo hisi-phone unpair <ID>     删除一台手机
+# 说明见仓库 docs/phone-unlock.md
+exec /usr/local/lib/hisi-bio/hisi-bio-unlock phone "$@"

@@ -18,6 +18,10 @@ libgbm1
 libqt6gui6
 ddm
 lightdm
+# 锁屏指纹 / 人脸图标（libtl-lockbio）用 QtQuick.Shapes 画；它是自动装上的依赖，autoremove 可能把它带走
+qml6-module-qtquick-shapes
+deepin-authenticate
+deepin-face
 dde-shell
 dde-control-center
 libmpv2
@@ -31,6 +35,9 @@ libc6
 libdrm2
 libssl3
 bluez
+# 手机指纹解锁给手机看的锁屏截图：grim 抓 PPM（它的 JPEG 支持没编进来），cjpeg 压成 JPEG
+grim
+libjpeg-turbo-progs
 grub-common
 grub2-common
 grub-efi-arm64

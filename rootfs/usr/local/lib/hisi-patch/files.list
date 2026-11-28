@@ -18,6 +18,7 @@ unowned:/usr/local/share/wallpapers/wwp/*/*
 /usr/local/lib/hisi-nmfix/*
 /usr/local/lib/hisi-treeland/*
 /usr/local/lib/hisi-wpa/*
+/usr/local/lib/hisi-bio/*
 /etc/systemd/system/treeland.service.d/l540-no-rt.conf
 /etc/systemd/system/treeland.service.d/l541-malibuf.conf
 /etc/systemd/system/wpa_supplicant.service.d/hisi.conf
@@ -30,6 +31,13 @@ unowned:/usr/local/share/wallpapers/wwp/*/*
 /etc/systemd/system/hisi-next-boot.service
 /etc/systemd/system/hisi-next-boot.timer
 /etc/systemd/system/hisi-patch-firstboot.service
+/etc/systemd/system/hisi-strip-selinux-xattr.service
+/etc/systemd/system/hisi-bio-unlock.service
+# hisi-bio-unlock 的 D-Bus 名字 org.hisi.BioUnlock1：给锁屏界面（libtl-lockbio）状态、给 hisi-phone-link 转手机请求
+/etc/dbus-1/system.d/org.hisi.BioUnlock1.conf
+# 手机指纹解锁：Wi-Fi / 蓝牙收发服务和它的运行用户 hisi-phone
+/etc/systemd/system/hisi-phone-link.service
+/etc/sysusers.d/hisi-phone.conf
 /usr/local/lib/hisi-patch/apt-pre-hook
 /usr/local/lib/hisi-patch/wait-dpkg-idle
 /etc/systemd/system/ddm.service.d/hisi-seatd-wait.conf
@@ -44,6 +52,9 @@ unowned:/usr/local/share/wallpapers/wwp/*/*
 unowned:/usr/share/alsa-card-profile/mixer/profile-sets/pulse-huawei.conf
 unowned:/usr/share/alsa-card-profile/mixer/paths/*-huawei*.conf
 /usr/bin/fingerprint_daemon
+# 指纹/人脸：deepin-authenticate 按 /proc/self/exe 匹配白名单；ddm/treeland 是 d25 的认证调用进程
+/usr/share/deepin-authentication/allowlist
+/usr/share/deepin-authentication/app-type-list
 unowned:/usr/lib/*.so*
 noauto:/usr/lib/box64-x86_64-linux-gnu/*
 noauto:/etc/box64.box64rc

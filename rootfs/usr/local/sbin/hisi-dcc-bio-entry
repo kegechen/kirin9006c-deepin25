@@ -1,0 +1,100 @@
+#!/usr/bin/python3 -I
+# hisi-dcc-bio-entry —— 让 deepin 25 控制中心在 treeland 下也显示“账户 → 登录方式 → 生物认证”（录指纹 / 人脸的入口）。
+#
+# dde-control-center 的 authentication 插件写死了
+#     visible: (hasFingerprint || hasChara) && !DccApp.isTreeland()
+# 因为 treeland 锁屏不支持生物识别，入口在 treeland 会话里被整个藏掉。锁屏的指纹 / 人脸由 hisi-bio-unlock 补上，
+# 这里把入口放出来：
+#   1. 等长改 QML 源码 "!" → "~"（~true、~false 都非零，等于去掉 isTreeland 这个条件）；
+#   2. 该 QML 有预编译的 AOT 单元，引擎优先用它、不看源码：把它的 magic 改坏（qv4cdata → qv4cdatX），
+#      引擎认不出这个单元就回退到（已改的）源码。
+# 用法（root）：
+#   hisi-dcc-bio-entry          打补丁（幂等）；已打开的控制中心要重开才生效
+#   hisi-dcc-bio-entry --check  只检查。退出码 0=已打 1=未打 2=插件内容不认识（版本变了，需要重新适配） 3=插件不存在
+#   hisi-dcc-bio-entry --undo   还原成原样
+# dde-control-center 升级会覆盖插件：hisi-patch-check 会报出来，--fix 时自动重打。
+import os
+import sys
+
+LIB = "/usr/lib/aarch64-linux-gnu/dde-control-center/plugins_v1.1/authentication/libauthentication_qml.so"
+SRC_ORIG = b"visible: (hasFingerprint || hasChara) && !DccApp.isTreeland()"
+SRC_PATCHED = b"visible: (hasFingerprint || hasChara) && ~DccApp.isTreeland()"
+MAGIC, MAGIC_OFF = b"qv4cdata", b"qv4cdatX"
+# AOT 单元的字符串表是 UTF-16LE；同时含这两个标识符的就是“生物认证”那个 QML
+UNIT_TAGS = ("isTreeland".encode("utf-16-le"), "hasChara".encode("utf-16-le"))
+
+
+def find_units(d):
+    """返回 [(偏移, 当前 magic)]：内容属于目标 QML 的 AOT 单元"""
+    found = []
+    for magic in (MAGIC, MAGIC_OFF):
+        i = d.find(magic)
+        while i >= 0:
+            # QV4::CompiledData::Unit：magic[8] version u32 qtVersion u32 sourceTimeStamp i64 unitSize u32
+            size = int.from_bytes(d[i + 24:i + 28], "little")
+            if 32 < size <= len(d) - i and all(t in d[i:i + size] for t in UNIT_TAGS):
+                found.append((i, magic))
+            i = d.find(magic, i + 1)
+    return sorted(found)
+
+
+def state(d):
+    """('patched'|'orig'|'partial', 说明) 或 ('unknown', 原因)"""
+    n_orig, n_new = d.count(SRC_ORIG), d.count(SRC_PATCHED)
+    units = find_units(d)
+    if n_orig + n_new != 1:
+        return "unknown", f"QML 源码里找不到唯一的入口条件（原样 {n_orig} 处、已改 {n_new} 处）"
+    if len(units) != 1:
+        return "unknown", f"找不到唯一的 AOT 单元（{len(units)} 个）"
+    src_done, unit_done = n_new == 1, units[0][1] == MAGIC_OFF
+    if src_done and unit_done:
+        return "patched", "控制中心“生物认证”入口已放开"
+    if not src_done and not unit_done:
+        return "orig", "控制中心“生物认证”入口未放开（插件是原样）"
+    return "partial", f"补丁只打了一半（源码{'已' if src_done else '未'}改、AOT 单元{'已' if unit_done else '未'}停用）"
+
+
+def write(d):
+    tmp = os.path.join(os.path.dirname(LIB), "." + os.path.basename(LIB) + ".hisi-new")
+    st = os.stat(LIB)
+    with open(tmp, "wb") as f:
+        f.write(d)
+        f.flush()
+        os.fsync(f.fileno())   # rename 落盘但数据没落盘时，断电会让插件变成空文件
+    os.chmod(tmp, st.st_mode & 0o7777)
+    os.chown(tmp, st.st_uid, st.st_gid)
+    os.replace(tmp, LIB)   # 正在运行的控制中心映射着旧文件，不能原地改
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    if mode not in ("", "--check", "--undo"):
+        print("用法：hisi-dcc-bio-entry [--check | --undo]")
+        return 64
+    if not os.path.isfile(LIB):
+        print(f"控制中心认证插件不存在（{LIB}）")
+        return 3
+    d = bytearray(open(LIB, "rb").read())
+    s, msg = state(d)
+    if s == "unknown":
+        print(f"插件内容不认识，没有改动：{msg}")
+        return 2
+    if mode == "--check":
+        print(msg)
+        return 0 if s == "patched" else 1
+    want = mode != "--undo"
+    if s == ("patched" if want else "orig"):
+        print(msg + "（无需改动）")
+        return 0
+    (off, _), = find_units(d)
+    i = d.find(SRC_ORIG if want else SRC_PATCHED)
+    if i >= 0:
+        d[i:i + len(SRC_ORIG)] = SRC_PATCHED if want else SRC_ORIG
+    d[off:off + 8] = MAGIC_OFF if want else MAGIC
+    write(bytes(d))
+    print("已放开控制中心“生物认证”入口（重开控制中心生效）" if want else "已还原控制中心认证插件")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

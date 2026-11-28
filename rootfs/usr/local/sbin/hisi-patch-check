@@ -40,6 +40,13 @@ WLROOTS_LIB=/usr/lib/aarch64-linux-gnu/libwaylib-wlroots.so.0.20
 WLROOTS_REAL=libwaylib-wlroots.so.0.20.2   # tl-malibuf 按此版本的结构布局编写
 WL_SYMS="wlr_allocator_autocreate wlr_drm_create wlr_buffer_init wlr_buffer_finish wlr_buffer_drop wlr_buffer_register_resource_interface wlr_dmabuf_attributes_finish wlr_backend_get_drm_fd wlr_renderer_get_drm_fd"
 WALLPAPER_TOOL=/usr/local/sbin/hisi-wallpaper-reencode
+DCC_BIO_TOOL=/usr/local/sbin/hisi-dcc-bio-entry
+# 锁屏指纹 / 人脸界面（libtl-lockbio.so）：只认 lockbio.known 里列出的锁屏插件，画图标要 QtQuick.Shapes
+LOCKBIO_SO=/usr/local/lib/hisi-treeland/libtl-lockbio.so
+LOCKBIO_KNOWN=/usr/local/lib/hisi-treeland/lockbio.known
+LOCKSCREEN_SO=/usr/lib/aarch64-linux-gnu/treeland/plugins/liblockscreen.so
+QML_SHAPES=/usr/lib/aarch64-linux-gnu/qt6/qml/QtQuick/Shapes/qmldir
+LOCKBIO_GUARD=.hisi-lockbio-starting   # 在 greeter 用户 dde 的家目录里，treeland 启动 60 秒后自动删
 # 桌面用户（用户级 systemd 检查、桌面通知）：默认 uid 1000，可用 HISI_DESKTOP_UID 覆盖
 DESKTOP_UID=${HISI_DESKTOP_UID:-1000}
 DESKTOP_USER=$(getent passwd "$DESKTOP_UID" 2>/dev/null | cut -d: -f1)
@@ -67,6 +74,8 @@ esac
 STAMP=$(date +%Y%m%d-%H%M%S)
 N_OK=0; N_CHG=0; N_MIS=0; N_ALM=0; N_WRN=0; N_SKIP=0
 FIXED=0
+DBUS_RELOAD=0
+SYSUSERS=0
 RESTART=""
 REPORT=""; TMPF=""; TMPF2=""
 
@@ -129,8 +138,16 @@ fixfile(){  # $1=路径 $2=类型(file/link) $3=sha256或链接目标
     say "  [修复] 已从黄金副本恢复 $1"
     FIXED=1
     case "$1" in
-      /usr/local/lib/hisi-mali/*|/etc/systemd/system/treeland.service.d/*|/etc/glvnd/egl_vendor.d/*)
+      /usr/local/lib/hisi-mali/*|/usr/local/lib/hisi-treeland/*.so|/etc/systemd/system/treeland.service.d/*|/etc/glvnd/egl_vendor.d/*)
         RESTART="$RESTART treeland.service" ;;
+      /usr/local/lib/hisi-bio/hisi-phone-link|/etc/systemd/system/hisi-phone-link.service)
+        RESTART="$RESTART hisi-phone-link.service" ;;
+      /usr/local/lib/hisi-bio/*|/etc/systemd/system/hisi-bio-unlock.service)
+        RESTART="$RESTART hisi-bio-unlock.service" ;;
+      /etc/sysusers.d/*)
+        SYSUSERS=1; DBUS_RELOAD=1 ;;
+      /etc/dbus-1/system.d/*)
+        DBUS_RELOAD=1 ;;
       /usr/local/lib/hisi-nmfix/*|/etc/systemd/system/NetworkManager.service.d/*|/etc/NetworkManager/conf.d/*)
         RESTART="$RESTART NetworkManager.service" ;;
       /usr/local/sbin/wpa_supplicant-hisi|/usr/local/lib/hisi-wpa/*|/etc/systemd/system/wpa_supplicant.service.d/*)
@@ -376,11 +393,11 @@ check_state(){
   if [ -z "$e" ]; then skp "treeland.service 无法查询"
   else
     miss=""
-    for l in libmali-compat.so libmali.so.0 libtl-malibuf.so libtl-norender.so; do
+    for l in libmali-compat.so libmali.so.0 libtl-malibuf.so libtl-norender.so libtl-lockbio.so; do
       case "$e" in *"$l"*) ;; *) miss="$miss $l" ;; esac
     done
     if [ -z "$miss" ]; then
-      ok "treeland.service 预加载齐全（libmali-compat/libmali/libtl-malibuf/libtl-norender）"
+      ok "treeland.service 预加载齐全（libmali-compat/libmali/libtl-malibuf/libtl-norender/libtl-lockbio）"
     else
       chg "treeland.service 环境缺失:$miss（drop-in 或 so 文件被覆盖？）"
       RESTART="$RESTART treeland.service"
@@ -541,6 +558,91 @@ check_wallpaper(){
   esac
 }
 
+# 检查项 11b：控制中心“生物认证”入口（hisi-dcc-bio-entry 改的是 deb 里的插件，dde-control-center 升级会覆盖）
+check_dcc_bio(){
+  note "-- 控制中心生物认证入口（hisi-dcc-bio-entry --check） --"
+  [ $TESTROOT = 1 ] && { skp "测试根模式，跳过"; return; }
+  local out rc
+  [ -x "$DCC_BIO_TOOL" ] || { skp "hisi-dcc-bio-entry 未安装"; return; }
+  out=$(timeout 60 "$DCC_BIO_TOOL" --check 2>&1)
+  rc=$?
+  if [ $rc = 1 ] && [ $FIX = 1 ]; then
+    # 改完立即生效、可 --undo 还原，所以 --fix 直接重打
+    if out=$(timeout 60 "$DCC_BIO_TOOL" 2>&1); then
+      say "  [修复] $out"
+      FIXED=1
+    else
+      say "  [修复失败] hisi-dcc-bio-entry：$out"
+    fi
+    out=$(timeout 60 "$DCC_BIO_TOOL" --check 2>&1)
+    rc=$?
+  fi
+  case $rc in
+    0) ok "$out" ;;
+    1) chg "$out（多半是 dde-control-center 升级覆盖了）。恢复：sudo hisi-patch-check --fix" ;;
+    3) skp "$out" ;;
+    *) wrn "$out" ;;
+  esac
+}
+
+# 检查项 11c：锁屏指纹 / 人脸界面（libtl-lockbio.so 遇到没核对过的锁屏插件、缺依赖或上次启动崩溃会自行停用，
+#             锁屏退回只有密码框；后台 hisi-bio-unlock 的指纹 / 人脸解锁不受影响，所以这里都只报警告）
+check_lockbio(){
+  note "-- 锁屏指纹 / 人脸界面（libtl-lockbio） --"
+  [ $TESTROOT = 1 ] && { skp "测试根模式，跳过"; return; }
+  [ -e "$LOCKBIO_SO" ] || { skp "libtl-lockbio.so 未安装"; return; }
+  local sum home pid age
+  if [ ! -r "$LOCKSCREEN_SO" ]; then
+    wrn "$LOCKSCREEN_SO 不存在（treeland 换了插件位置？），锁屏不会显示指纹 / 人脸图标"
+  else
+    sum=$(sha256sum "$LOCKSCREEN_SO" 2>/dev/null | cut -d' ' -f1)
+    if grep -v '^#' "$LOCKBIO_KNOWN" 2>/dev/null | cut -d' ' -f1 | grep -qx "$sum"; then
+      ok "锁屏插件 liblockscreen.so 已核对过（在 lockbio.known 里）"
+    else
+      wrn "锁屏插件 sha256 $sum 不在 $LOCKBIO_KNOWN（treeland 升级了）：锁屏只剩密码框。对照新版 UserInput.qml 复核 src/lockbio/UserInputHisi.qml 和 qmldir，再把 sha256 加进 lockbio.known"
+    fi
+  fi
+  if [ -e "$QML_SHAPES" ]; then
+    ok "QtQuick.Shapes 已安装（锁屏图标依赖）"
+  else
+    wrn "缺 $QML_SHAPES：锁屏指纹 / 人脸界面不会启用。恢复：sudo apt install qml6-module-qtquick-shapes，再 systemctl restart treeland"
+  fi
+  home=$(getent passwd dde 2>/dev/null | cut -d: -f6)
+  if [ -n "$home" ] && [ -e "$home/$LOCKBIO_GUARD" ]; then
+    pid=$(pgrep -xo treeland) || pid=""
+    age=""
+    [ -n "$pid" ] && age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+    # treeland 刚启动的 60 秒里有这个标记是正常的
+    if [ -z "$age" ] || [ "$age" -gt 90 ]; then
+      wrn "$home/$LOCKBIO_GUARD 还在：之前有一次 treeland 启动没撑过 60 秒，锁屏指纹 / 人脸界面已自动停用。查 journalctl -u treeland（hisi.lockbio / qml 报错）后删掉它，再 systemctl restart treeland"
+    fi
+  fi
+}
+
+# 检查项 11d：手机指纹解锁（可选功能，没启用就跳过；有问题只报警告）
+check_phone(){
+  note "-- 手机指纹解锁（hisi-phone-link） --"
+  [ $TESTROOT = 1 ] && { skp "测试根模式，跳过"; return; }
+  [ -e /etc/systemd/system/hisi-phone-link.service ] || { skp "hisi-phone-link.service 未安装"; return; }
+  local en act n
+  en=$(systemctl is-enabled hisi-phone-link.service 2>/dev/null) || true
+  if [ "$en" != enabled ]; then skp "hisi-phone-link.service 未启用（不用手机解锁就不用管）"; return; fi
+  if ! getent passwd hisi-phone >/dev/null 2>&1; then
+    wrn "系统用户 hisi-phone 不存在：hisi-phone-link 起不来。恢复：sudo systemd-sysusers && sudo systemctl reload dbus && sudo systemctl restart hisi-phone-link"
+    return
+  fi
+  act=$(systemctl is-active hisi-phone-link.service 2>/dev/null) || true
+  if [ "$act" != active ]; then
+    wrn "hisi-phone-link.service 未运行（$act）：手机连不上。看 journalctl -u hisi-phone-link"
+  elif ss -Hltn 'sport = :47390' 2>/dev/null | grep -q .; then
+    ok "hisi-phone-link 运行中，Wi-Fi 端口 47390 在监听"
+  else
+    wrn "hisi-phone-link 在运行但 TCP 47390 没在监听（端口被占？）"
+  fi
+  n=$(grep -c '^\[phone ' /var/lib/hisi-bio/phones.ini 2>/dev/null) || n=0
+  inf "已配对手机 $n 台（sudo hisi-phone list 查看，sudo hisi-phone pair 配对）"
+}
+
 # 检查项 12：treeland 运行时（尽力而为）
 check_runtime(){
   note "-- 运行时（treeland 进程已加载的库） --"
@@ -591,6 +693,9 @@ run_all_checks(){
   check_glvendor
   check_usersession
   check_wallpaper
+  check_dcc_bio
+  check_lockbio
+  check_phone
   check_runtime
   check_risks
 }
@@ -603,6 +708,22 @@ finish_fix(){
     say "  [修复] systemctl daemon-reload 已执行"
   else
     say "  [修复失败] systemctl daemon-reload"
+  fi
+  # 恢复了 sysusers 配置：补建系统用户（已存在就什么都不做），之后 D-Bus 才认得按用户名放行的规则
+  if [ $SYSUSERS = 1 ]; then
+    if systemd-sysusers >/dev/null 2>&1; then
+      say "  [修复] systemd-sysusers 已执行"
+    else
+      say "  [修复失败] systemd-sysusers"
+    fi
+  fi
+  # 恢复了 D-Bus 策略：reload 只是重读配置，不断开任何连接
+  if [ $DBUS_RELOAD = 1 ]; then
+    if systemctl reload dbus.service 2>/dev/null; then
+      say "  [修复] systemctl reload dbus 已执行（D-Bus 策略重新生效）"
+    else
+      say "  [修复失败] systemctl reload dbus"
+    fi
   fi
   if [ -n "$DESKTOP_USER" ] && [ -d "$USER_RUN" ]; then
     if timeout 15 sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="$USER_RUN" systemctl --user daemon-reload >/dev/null 2>&1; then

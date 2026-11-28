@@ -1,0 +1,30 @@
+[Unit]
+Description=Fingerprint / face / phone unlock for the treeland lock screen (drives deepin-authenticate)
+After=dbus.service systemd-logind.service
+
+[Service]
+Type=simple
+# root：读 /dev/input 判断有人回来、调 logind UnlockSession、ResetLimits 只允许 root；
+# 手机解锁的配对库在 /var/lib/hisi-bio（StateDirectory，root 0700）；
+# 给手机的锁屏截图要降权到桌面用户、连 /run/user/<uid> 里的 wayland socket，所以 /run/user 只读放进来，/home、/root 仍看不到
+ExecStart=/usr/local/lib/hisi-bio/hisi-bio-unlock
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=/run/user
+StateDirectory=hisi-bio
+StateDirectoryMode=0700
+UMask=0077
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+DevicePolicy=closed
+DeviceAllow=char-input r
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,89 @@
+#!/usr/bin/python3
+"""去掉 security.selinux 扩展属性。只在给定路径所在的文件系统里走，不跨挂载点。
+
+用法（在 deepin 里，不是在 UOS 里）：
+    sudo hisi-strip-selinux-xattr /        # 清 deepin 根分区
+    hisi-strip-selinux-xattr -n /          # 只统计，不改
+
+为什么要清：一键装机在 UOS 下运行，UOS 开着 SELinux，解包和 chroot 里写到新分区的文件
+都被打上 security.selinux 标签。deepin 不加载 SELinux，这时内核要求有 CAP_SYS_ADMIN 才能写
+security.* 属性。5.4 内核不能在用户命名空间里挂内核 overlay，玲珑退回 fuse-overlayfs，
+ll-package-manager 以普通服务账号（uid 991）做 copy-up 时要连这个属性一起复制，结果 EPERM：
+所有玲珑应用（记事本、相机、计算器……）一点开就退出，日志是
+“init run context failed ... rootfs/etc/localtime”。
+
+必须在 deepin 里跑：UOS 加载着 SELinux 时，内核不允许删除 security.selinux（permissive 也不行），
+所以装机脚本只 enable hisi-strip-selinux-xattr.service，让它在 deepin 首次开机时跑一次。
+/home 在 /data 上、和 UOS 共用，是另一个文件系统，不会被碰到。
+"""
+import os
+import stat
+import sys
+
+NAME = "security.selinux"
+
+
+def strip(root, dry_run):
+    dev = os.lstat(root).st_dev
+    found = errors = 0
+
+    def report(path, err):
+        nonlocal errors
+        errors += 1
+        if errors <= 20:
+            print(f"  {path}: {err.strerror}", file=sys.stderr)
+
+    def one(path):
+        nonlocal found
+        try:
+            if NAME not in os.listxattr(path, follow_symlinks=False):
+                return
+            found += 1
+            if not dry_run:
+                os.removexattr(path, NAME, follow_symlinks=False)
+        except OSError as e:
+            report(path, e)
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: report(e.filename, e)):
+        one(dirpath)
+        keep = []
+        for d in dirnames:
+            p = os.path.join(dirpath, d)
+            try:
+                st = os.lstat(p)
+            except OSError as e:
+                report(p, e)
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                one(p)  # 指向目录的符号链接：只处理链接本身
+            elif st.st_dev == dev:
+                keep.append(d)
+            # 其他文件系统（/home、/data、/media/uos/Roota、/proc……）不进去
+        dirnames[:] = keep
+        for f in filenames:
+            one(os.path.join(dirpath, f))
+    return found, errors
+
+
+def main():
+    args = sys.argv[1:]
+    dry_run = "-n" in args
+    paths = [a for a in args if a != "-n"]
+    if not paths:
+        print(__doc__.strip().split("\n\n")[1], file=sys.stderr)
+        return 2
+    if not dry_run and os.geteuid() != 0:
+        print("要用 sudo 运行（或加 -n 只统计）", file=sys.stderr)
+        return 2
+    rc = 0
+    for p in paths:
+        found, errors = strip(p, dry_run)
+        verb = "带标签" if dry_run else "已清除"
+        print(f"{p}：{verb} {found} 个，出错 {errors} 个")
+        if errors:
+            rc = 1
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

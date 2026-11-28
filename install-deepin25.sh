@@ -81,7 +81,9 @@ BOOT_REMOUNTED=0
 KEEPALIVE=
 LONG_PID=
 CUSTOM_BAK=
-BUILD_DEPS="gcc make pkg-config libwayland-dev libdrm-dev libegl-dev libglvnd-core-dev"
+# 后四个给 libtl-lockbio（锁屏指纹 / 人脸界面）：moc / rcc、Qt6Core/DBus/Qml，图标用 QtQuick.Shapes 画
+# 后三个是手机指纹解锁运行时用的：grim + cjpeg 给手机截锁屏图，qrencode 在终端显示配对二维码
+BUILD_DEPS="gcc g++ make pkg-config libwayland-dev libdrm-dev libegl-dev libglvnd-core-dev libglib2.0-dev libssl-dev qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qml6-module-qtquick-shapes grim libjpeg-turbo-progs qrencode"
 WWP_DEPS="cmake ninja-build g++ pkg-config qt6-base-dev qt6-base-private-dev qt6-declarative-dev qt6-declarative-private-dev qt6-wayland-dev qt6-wayland-private-dev qt6-wayland-dev-tools libdtk6core-dev libmpv-dev treeland-protocols libwayland-dev qml6-module-qtquick-particles qml6-module-qtquick-shapes qt6-webengine-dev qml6-module-qtwebengine"
 APT="apt-get -o Acquire::SmartMirrors::Enable=false -o Dpkg::Use-Pty=0"
 
@@ -736,7 +738,7 @@ fi
 progress "首启补丁已就位"
 
 # ==== 9 ====
-next "现场编译并安装补丁（5 个 .so 垫片 + 自检、看门狗、启动切换脚本）"
+next "现场编译并安装补丁（6 个 .so 垫片、锁屏指纹 / 人脸联动和界面、手机指纹解锁 + 自检、看门狗、启动切换脚本）"
 S mount --bind / "$M/media/uos/Roota" || die "绑定 UOS 根分区失败"
 S mount --make-slave "$M/media/uos/Roota" || die "把 UOS 根分区的绑定设成 slave 失败"
 S mount -o remount,bind,ro "$M/media/uos/Roota" || die "UOS 根分区改只读失败"
@@ -748,13 +750,23 @@ C sh /opt/kirin9006c-deepin25/scripts/fetch-uos-blobs.sh /media/uos/Roota > "$T/
   || die "复制厂商组件失败（$T/fetch-blobs.log）"
 umount_if "$M/media/uos/Roota"
 C make -C /opt/kirin9006c-deepin25 clean > /dev/null 2>&1
-progress "make：编译 5 个垫片"
+progress "make：编译 6 个垫片、hisi-bio-unlock 和 hisi-phone-link"
 long "$T/make.log" C make -C /opt/kirin9006c-deepin25 || die "编译失败（$T/make.log）"
 C make -C /opt/kirin9006c-deepin25 install NOHINT=1 > "$T/make-install.log" 2>&1 || die "make install 失败（$T/make-install.log）"
+# hisi-strip-selinux-xattr：UOS 开着 SELinux，写进新分区的文件都带 security.selinux 标签，玲珑应用会因此全部起不来。
+# 在这里（UOS 下）删不掉，只能 enable，让它在 deepin 首次开机时清一次
 for u in hisi-patch-firstboot.service hisi-patch-check.service hisi-patch-check.timer hisi-ddm-watchdog.service \
-         hisi-next-boot.timer d25-bootguard.service; do
+         hisi-next-boot.timer d25-bootguard.service hisi-strip-selinux-xattr.service hisi-bio-unlock.service; do
   C systemctl enable "$u" >/dev/null 2>&1 || warn "启用 $u 失败"
 done
+# 手机指纹解锁：先按 /etc/sysusers.d/hisi-phone.conf 建运行用户 hisi-phone，再启用收发服务（不用可 disable）
+if C systemd-sysusers /etc/sysusers.d/hisi-phone.conf > "$T/sysusers.log" 2>&1; then
+  C systemctl enable hisi-phone-link.service >/dev/null 2>&1 || warn "启用 hisi-phone-link.service 失败"
+else
+  warn "建用户 hisi-phone 失败，手机解锁不可用（$T/sysusers.log）"
+fi
+# 控制中心在 treeland 下藏掉了“生物认证”（录指纹 / 人脸）入口，放出来；锁屏那头由 hisi-bio-unlock.service 联动
+C /usr/local/sbin/hisi-dcc-bio-entry > "$T/dcc-bio-entry.log" 2>&1 || warn "控制中心生物认证入口没放开（$T/dcc-bio-entry.log）"
 progress "补丁已编译安装（源码留在新系统的 /opt/kirin9006c-deepin25；基线在首次开机时自动建立）"
 
 # ==== 可选：天气壁纸（只在给了 --weather-wallpaper 时出现，默认没有这一步）====

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知栏小图标（只看透明度）：笔记本电脑 + 锁，同 ic_launcher_fg 的造型。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 屏幕外框（中间挖空，挖空处放锁） -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M5,4 H19 A1,1 0 0 1 20,5 V16 H4 V5 A1,1 0 0 1 5,4 Z M6,6 V14 H18 V6 Z" />
+    <!-- 底座 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M2,17 H22 L21,19 H3 Z" />
+    <!-- 锁梁 -->
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.2"
+        android:fillColor="#00000000"
+        android:pathData="M10.4,10 V8.6 A1.6,1.6 0 0 1 13.6,8.6 V10" />
+    <!-- 锁身 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M9.5,10 H14.5 V13.2 H9.5 Z" />
+</vector>

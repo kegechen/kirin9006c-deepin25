@@ -34,7 +34,9 @@
 | 开机登录界面 | ddm 0.4 抢在 dde-seatd 建好控制 socket 前启动会段错误，drop-in 先等 socket 再启动 | `ddm.service.d/hisi-seatd-wait.conf` |
 | 注销后重新登录 | ddm 0.4 偶发卡死，由看门狗自动恢复 | `hisi-ddm-watchdog` |
 | 补丁被升级覆盖 | apt 钩子 + 每日定时检查，异常时桌面通知，可一键恢复 | `hisi-patch-check` |
-| 指纹 | sudo/polkit 可用；锁屏和登录界面只能输密码 | 见 [docs/known-issues.md](docs/known-issues.md) |
+| 指纹 / 人脸 | 控制中心可录入；锁屏按指纹 / 看摄像头直接解锁，界面有指纹 / 人脸图标和提示，也可输密码；sudo/polkit 可用；登录界面只能输密码 | `hisi-bio-unlock`、`libtl-lockbio.so`、`hisi-dcc-bio-entry`，见 [docs/known-issues.md](docs/known-issues.md) |
+| 手机指纹解锁 | 安卓 App 经 Wi‑Fi 或蓝牙连上电脑，显示电脑名、用户名和锁屏截图，按手机指纹解锁（配对一次，之后每次挑战签名） | `hisi-phone-link`、`hisi-phone`、`android/phone-unlock/`，见 [docs/phone-unlock.md](docs/phone-unlock.md) |
+| 玲珑应用 | 记事本、相机等正常；UOS 装机留下的 SELinux 标签会让它们全部闪退，首次开机自动清除 | `hisi-strip-selinux-xattr`，见 [docs/known-issues.md](docs/known-issues.md) |
 | Xwayland | 仍是软件渲染 | — |
 | 视频解码 | 纯软件（deepin 的 ffmpeg 6.1 没有 OMX 解码器） | — |
 
@@ -58,23 +60,35 @@ src/                      垫片源码（在目标机上编译）
   tl-malibuf.c              给 treeland 补上 libmali 客户端需要的私有协议 mali_buffer_sharing v5
   tl-norender.c             让 wlroots 不用假 render 节点、dmabuf 导出补 O_RDWR
   nm-station-fix.c          NetworkManager：把永不结束的 nl80211 station dump 改成单次查询
+  hisi-bio-unlock.c         锁屏指纹 / 人脸：监听 logind 锁屏，驱动 deepin 的 Authenticate1，通过后 UnlockSession
+  hisi-bio-phone.c          同一进程里的手机解锁：配对库、挑战、验签、锁屏截图（root，无网络）
+  hisi-bio-phonectl.c       hisi-phone pair / list / unpair 命令
+  hisi-phone-link.c         手机解锁的 Wi‑Fi（TCP/UDP 47390）和蓝牙 BLE 收发，低权限用户运行
+  tl-lockbio.cpp            锁屏界面的指纹 / 人脸图标和提示（treeland 预加载，换掉锁屏插件里的 UserInput）
+  lockbio/                  上面用到的 QML（UserInputHisi.qml）和 LockScreen 模块清单，编进 .so
 rootfs/                   按原路径安装的文件（/etc、/usr/local）
   etc/systemd/system/...    treeland / NetworkManager / wpa_supplicant / hciattach / ddm 的 drop-in，
                             hisi-ddm-watchdog、hisi-patch-check 的单元
   etc/glvnd/egl_vendor.d/   10_hisi_mali.json（让 glvnd 先问 libmali 垫片，再问 Mesa）
   etc/hisi-mali/egl-deny    GPU 黑名单（用户可编辑）
   etc/NetworkManager/       关闭扫描随机 MAC、关闭 Wi‑Fi 省电
+  etc/dbus-1/system.d/      org.hisi.BioUnlock1.conf（锁屏界面向 hisi-bio-unlock 取状态、hisi-phone-link 转手机请求）
+  etc/sysusers.d/           hisi-phone.conf（hisi-phone-link 的运行用户）
   etc/udev/rules.d/         91-pipewire-huawei.rules（让 PipeWire 用华为声卡配置集）
   etc/wireplumber/          90-hisi-da-combine.conf（内置声卡固定 960 帧 DMA 周期，去杂音）
   etc/apt/apt.conf.d/       hisi-patch-check 的 apt 钩子
-  usr/local/sbin/           d25-init、hisi-ddm-watchdog、hisi-wallpaper-reencode、hisi-patch-check
+  usr/local/sbin/           d25-init、hisi-ddm-watchdog、hisi-wallpaper-reencode、hisi-patch-check、
+                            hisi-dcc-bio-entry（放开控制中心的生物认证入口）、hisi-phone（手机配对）
   usr/local/lib/hisi-patch/ 补丁自检的跟踪清单、敏感包清单和说明
+  usr/share/deepin-authentication/  把 ddm、treeland 加进 deepin-authenticate 的调用方白名单
 scripts/fetch-uos-blobs.sh 从 UOS 分区复制厂商闭源组件（本仓库不含任何厂商二进制）
 examples/                 grub 入口、兜底 DNS 的示例（含占位符，按机器修改）
 trial-boot/               最初试启动用的探针和“10 分钟没网就重启回 UOS”的兜底服务
-tools/                    验证和测速脚本（GL 路径、CPU 占用、解码开销、gdb 抓崩溃）
+tools/                    验证和测速脚本（GL 路径、CPU 占用、解码开销、gdb 抓崩溃）；
+                            remote-view/ 浏览器远程查看 / 控制屏幕（含锁屏）；phone-unlock-test.py 不用手机测手机解锁
+android/phone-unlock/     手机指纹解锁的安卓 App（不用 Gradle，build.sh 直接用 SDK 工具出 APK）
 legacy/                   已被 glvnd 垫片取代的 LD_PRELOAD 客户端方案，留作参考
-docs/                     GPU 方案细节、已知问题
+docs/                     GPU 方案细节、已知问题、远程查看
 ```
 
 ## 一键装机
@@ -117,7 +131,9 @@ deepin 里的 `update-grub`（包括控制中心的启动菜单设置）只会�
 ### 2. 编译和安装（在 deepin 25 下操作）
 
 ```sh
-sudo apt install gcc make pkg-config libwayland-dev libdrm-dev libegl-dev libglvnd-core-dev
+sudo apt install gcc g++ make pkg-config libwayland-dev libdrm-dev libegl-dev libglvnd-core-dev libglib2.0-dev libssl-dev \
+  qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qml6-module-qtquick-shapes \
+  grim libjpeg-turbo-progs qrencode              # 最后一行是手机指纹解锁用的（锁屏截图、配对二维码）
 # UOS 根分区（Roota）挂载到 /media/uos/Roota 之后：
 sudo scripts/fetch-uos-blobs.sh /media/uos/Roota   # libmali、wpa_supplicant 2.9、OpenSSL 1.1、hciattach
 make
@@ -137,6 +153,12 @@ sudo systemctl enable ddm
 sudo systemctl daemon-reload
 sudo systemctl enable --now hisi-ddm-watchdog.service hisi-patch-check.timer
 sudo systemctl enable hisi-patch-check.service
+sudo systemctl enable --now hisi-strip-selinux-xattr.service   # 系统是在 UOS 下装的才需要；只跑一次，玲珑应用要靠它
+sudo systemctl reload dbus                            # 让 org.hisi.BioUnlock1 的策略生效（要在下一行之前）
+sudo systemctl enable --now hisi-bio-unlock.service   # 锁屏指纹 / 人脸
+sudo systemd-sysusers && sudo systemctl reload dbus   # 建 hisi-phone 用户，让它的 D-Bus 规则生效
+sudo systemctl enable --now hisi-phone-link.service   # 手机指纹解锁（Wi‑Fi / 蓝牙）；配对：sudo hisi-phone pair
+sudo hisi-dcc-bio-entry                               # 控制中心放出“生物认证”录入入口
 sudo systemctl restart wpa_supplicant NetworkManager
 sudo systemctl restart treeland          # 会回到锁屏，大部分会话进程会保留
 ```
@@ -169,7 +191,7 @@ sudo hisi-patch-check              # 全量检查，0=正常 1=补丁被改动/�
 apt 升级可能覆盖补丁（例如 treeland 升级换掉 drop-in 依赖的库，或 network-manager 升级后 drop-in 失效）。`hisi-patch-check` 会：
 
 - 把 `files.list` 里的文件与黄金副本逐个比对（sha256、权限、符号链接），检查 fstab 受保护行、UOS Boot 分区上的 grub 入口（debugfs 只读）；
-- 检查服务的 enable 状态、treeland/NetworkManager/wpa_supplicant 实际加载的环境、elfverify 状态、`libwaylib-wlroots` 版本和 9 个关键符号、敏感包版本、运行中的 treeland 和任务栏是否真的加载了 libmali、动态壁纸重编码是否完好；
+- 检查服务的 enable 状态、treeland/NetworkManager/wpa_supplicant 实际加载的环境、elfverify 状态、`libwaylib-wlroots` 版本和 9 个关键符号、敏感包版本、运行中的 treeland 和任务栏是否真的加载了 libmali、动态壁纸重编码是否完好、控制中心的生物认证入口是否还放开着；
 - 通过 `DPkg::Post-Invoke` 钩子在每次 dpkg 事务后静默运行，装敏感包前在终端醒目提示，开机后和每天各跑一次；发现问题给桌面用户（默认 uid 1000，`HISI_DESKTOP_UID` 可改）发通知；
 - `--fix` 先把现场备份到 `/var/backups/hisi-patch/<时间戳>/` 再从黄金副本恢复，不会自动重启图形和网络服务，只列出需要重启的服务。
 
@@ -192,6 +214,8 @@ apt 升级可能覆盖补丁（例如 treeland 升级换掉 drop-in 依赖的库
 
 - [docs/gpu.md](docs/gpu.md)：合成器和客户端怎么用上厂商 libmali，mali_buffer_sharing 协议细节，为什么用 glvnd vendor 而不是 LD_PRELOAD
 - [docs/known-issues.md](docs/known-issues.md)：ddm 二次登录卡死、动态壁纸、指纹、调试时的注意事项
+- [docs/phone-unlock.md](docs/phone-unlock.md)：用安卓手机指纹解锁电脑：组成、安全模型、Wi‑Fi / 蓝牙协议（电脑端和 App 照它对齐）
+- [docs/remote-view.md](docs/remote-view.md)：在 Windows 浏览器里远程看 / 控制屏幕（含锁屏）；为什么 grim 抓屏只有 1 帧多、dmabuf 路径要满足的三个条件
 
 ## 许可
 
