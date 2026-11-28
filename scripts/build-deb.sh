@@ -120,7 +120,7 @@ if [ "$1" = configure ]; then
 EOT
     # 全新安装时服务只 enable 未 start（升级则 try-restart 已在跑，不会打印这条）
     systemctl is-active --quiet hisi-bio-unlock.service || \
-        echo "  - 服务已 enable 未启动：sudo systemctl start hisi-bio-unlock hisi-phone-link hisi-ddm-watchdog（或重启系统）"
+        echo "  - 服务已 enable 未启动：sudo systemctl start hisi-bio-unlock hisi-phone-link hisi-ddm-watchdog hisi-patch-check.timer（或重启系统）"
 fi
 exit 0
 EOS
